@@ -1,0 +1,29 @@
+databaseChangeLog:
+  - changeSet:
+      id: 20260209-001-init-schema
+      author: codex
+      validCheckSum: 8:a4078a1180bee76949ceaf8841ad8b43
+      changes:
+        - sqlFile:
+            path: db/changelog/changelog/V1__init_schema.sql
+            relativeToChangelogFile: false
+            splitStatements: true
+            stripComments: false
+  - changeSet:
+      id: 20260209-002-add-indexes
+      author: codex
+      changes:
+        - sqlFile:
+            path: db/changelog/changelog/V2__add_indexes.sql
+            relativeToChangelogFile: false
+            splitStatements: true
+            stripComments: false
+  - changeSet:
+      id: 20260209-003-track-config-scope
+      author: codex
+      changes:
+        - sqlFile:
+            path: db/changelog/changelog/V3__track_source_config_scope.sql
+            relativeToChangelogFile: false
+            splitStatements: true
+            stripComments: false
