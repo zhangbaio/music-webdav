@@ -1,0 +1,56 @@
+server:
+  port: ${SERVER_PORT:18080}
+
+spring:
+  application:
+    name: music-webdav
+  datasource:
+    url: jdbc:mysql://localhost:3306/music_webdav?useUnicode=true&characterEncoding=UTF-8&useSSL=false&serverTimezone=Asia/Shanghai
+    username: zhangbiao
+    password: zb1998
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  liquibase:
+    enabled: true
+    change-log: classpath:db/changelog/db.changelog-master.yaml
+
+mybatis:
+  mapper-locations: classpath*:mapper/*.xml
+  type-aliases-package: com.example.musicwebdav.infrastructure.persistence.entity
+  configuration:
+    map-underscore-to-camel-case: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+
+logging:
+  file:
+    path: ./logs
+  level:
+    root: INFO
+    com.example.musicwebdav: INFO
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    operations-sorter: alpha
+    tags-sorter: alpha
+
+app:
+  scan:
+    batch-size: 300
+    parser-thread-count: 6
+    max-retry: 3
+    retry-backoff-ms: 500
+    audio-extensions: mp3,flac,m4a,aac,ogg,wav
+    incremental-cron: "0 0 3 * * ?"
+  security:
+    api-token: dev-token
+    encrypt-key: changeit12345678
+  webdav:
+    connect-timeout-ms: 5000
+    socket-timeout-ms: 15000
