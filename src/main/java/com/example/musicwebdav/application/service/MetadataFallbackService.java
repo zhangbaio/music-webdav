@@ -16,7 +16,9 @@ public class MetadataFallbackService {
     private static final String UNKNOWN_ARTIST = "Unknown Artist";
     private static final String UNKNOWN_ALBUM = "Unknown Album";
 
-    private static final Pattern DASH_PATTERN = Pattern.compile("^\\s*(.+?)\\s*-\\s*(.+?)\\s*$");
+    private static final Pattern DASH_PATTERN = Pattern.compile("^\\s*(.+?)\\s*[-－—–]\\s*(.+?)\\s*$");
+    private static final Pattern LEADING_TRACK_NO_PATTERN =
+            Pattern.compile("^\\s*\\d{1,3}\\s*(?:[-－—–]+|[\\._．。、:：]|\\))\\s*(.+)$");
 
     private static final Set<String> GENERIC_DIR_NAMES = new HashSet<>(Arrays.asList(
             "music", "audio", "songs", "download", "downloads",
@@ -50,7 +52,7 @@ public class MetadataFallbackService {
             return metadata;
         }
 
-        String fileBaseName = extractFileBaseName(relativePath);
+        String fileBaseName = normalizeTitle(extractFileBaseName(relativePath));
         String parentDir = extractParentDirName(relativePath);
         String grandparentDir = extractGrandparentDirName(relativePath);
 
@@ -82,7 +84,7 @@ public class MetadataFallbackService {
         if (!StringUtils.hasText(metadata.getTitle())) {
             metadata.setTitle(StringUtils.hasText(guessedTitle) ? guessedTitle : fileBaseName);
         } else {
-            metadata.setTitle(metadata.getTitle().trim());
+            metadata.setTitle(normalizeTitle(metadata.getTitle()));
         }
 
         if (!StringUtils.hasText(metadata.getArtist())) {
@@ -148,10 +150,27 @@ public class MetadataFallbackService {
     }
 
     private String inferAlbumFromDir(String parentDir, String grandparentDir, String artist) {
-        // Pattern: artist/album/song.mp3
-        if (StringUtils.hasText(parentDir) && !isGenericDirName(parentDir)
-                && !parentDir.equalsIgnoreCase(artist)) {
-            // parentDir is likely album if it's not the artist
+        if (!StringUtils.hasText(parentDir) || isGenericDirName(parentDir)) {
+            return null;
+        }
+
+        // Pattern: "artist - album/song.*" or "album - artist/song.*"
+        if (StringUtils.hasText(artist)) {
+            String[] parentParts = parseFilenameSegments(parentDir, DASH_PATTERN);
+            if (parentParts != null) {
+                String left = parentParts[0];
+                String right = parentParts[1];
+                if (artist.equalsIgnoreCase(left) && StringUtils.hasText(right) && !isGenericDirName(right)) {
+                    return right;
+                }
+                if (artist.equalsIgnoreCase(right) && StringUtils.hasText(left) && !isGenericDirName(left)) {
+                    return left;
+                }
+            }
+        }
+
+        // Pattern: artist/album/song.*
+        if (!parentDir.equalsIgnoreCase(artist)) {
             return parentDir;
         }
         return null;
@@ -217,5 +236,20 @@ public class MetadataFallbackService {
         }
         String trimmed = value.trim();
         return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    private String normalizeTitle(String title) {
+        String safeTitle = safe(title);
+        if (!StringUtils.hasText(safeTitle)) {
+            return "unknown-track";
+        }
+        Matcher matcher = LEADING_TRACK_NO_PATTERN.matcher(safeTitle);
+        if (matcher.matches()) {
+            String stripped = safe(matcher.group(1));
+            if (StringUtils.hasText(stripped)) {
+                return stripped;
+            }
+        }
+        return safeTitle;
     }
 }

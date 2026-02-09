@@ -26,6 +26,7 @@ import java.util.Deque;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.Set;
 import java.util.function.BooleanSupplier;
 import java.util.regex.Pattern;
@@ -230,16 +231,16 @@ public class PipelineScanService {
 
             try {
                 TrackEntity existing = trackMapper.selectByConfigAndPathMd5(config.getId(), pathMd5);
-                if (sameFingerprint(existing, file)) {
+                // Pure WebDAV infer mode may evolve over time; recompute metadata from path/dir and
+                // upsert when inferred fields differ, even if file fingerprint is unchanged.
+                AudioMetadata metadata = new AudioMetadata();
+                TrackEntity entity = buildTrackEntity(taskId, config.getId(), relativePath, pathMd5,
+                        file, metadata, coverUrl);
+                if (sameFingerprint(existing, file) && sameTrackMetadata(existing, entity)) {
                     dirResult.skipped++;
                     continue;
                 }
 
-                // Pure WebDAV mode: do not download media bytes, infer metadata from path/dir only.
-                AudioMetadata metadata = new AudioMetadata();
-
-                TrackEntity entity = buildTrackEntity(taskId, config.getId(), relativePath, pathMd5,
-                        file, metadata, coverUrl);
                 trackBatch.add(entity);
 
                 if (existing == null) {
@@ -448,6 +449,38 @@ public class PipelineScanService {
                     && existing.getSourceSize().equals(file.getSize());
         }
         return false;
+    }
+
+    private boolean sameTrackMetadata(TrackEntity existing, TrackEntity candidate) {
+        if (existing == null || candidate == null) {
+            return false;
+        }
+        return sameText(existing.getTitle(), candidate.getTitle())
+                && sameText(existing.getArtist(), candidate.getArtist())
+                && sameText(existing.getAlbum(), candidate.getAlbum())
+                && sameText(existing.getAlbumArtist(), candidate.getAlbumArtist())
+                && sameText(existing.getGenre(), candidate.getGenre())
+                && sameText(existing.getMimeType(), candidate.getMimeType())
+                && sameText(existing.getCoverArtUrl(), candidate.getCoverArtUrl())
+                && Objects.equals(existing.getTrackNo(), candidate.getTrackNo())
+                && Objects.equals(existing.getDiscNo(), candidate.getDiscNo())
+                && Objects.equals(existing.getYear(), candidate.getYear())
+                && Objects.equals(existing.getDurationSec(), candidate.getDurationSec())
+                && Objects.equals(existing.getBitrate(), candidate.getBitrate())
+                && Objects.equals(existing.getSampleRate(), candidate.getSampleRate())
+                && Objects.equals(existing.getChannels(), candidate.getChannels())
+                && Objects.equals(existing.getHasCover(), candidate.getHasCover());
+    }
+
+    private boolean sameText(String left, String right) {
+        return normalizeText(left).equals(normalizeText(right));
+    }
+
+    private String normalizeText(String value) {
+        if (value == null) {
+            return "";
+        }
+        return value.trim();
     }
 
     private String normalizeRelativePath(String value) {

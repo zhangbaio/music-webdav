@@ -123,6 +123,85 @@ class MetadataFallbackServiceTest {
     }
 
     @Test
+    void shouldExtractArtistFromArtistTitleFileName() {
+        AudioMetadata metadata = new AudioMetadata();
+
+        AudioMetadata result = metadataFallbackService.applyFallback(metadata, "music/梦然 - 时光海湾.mp3");
+
+        Assertions.assertEquals("时光海湾", result.getTitle());
+        Assertions.assertEquals("梦然", result.getArtist());
+    }
+
+    @Test
+    void shouldStripTrackNumberPrefixAndParseArtistTitle() {
+        AudioMetadata metadata = new AudioMetadata();
+
+        AudioMetadata result = metadataFallbackService.applyFallback(metadata, "music/01 - Jacky Cheung - Without You.flac");
+
+        Assertions.assertEquals("Without You", result.getTitle());
+        Assertions.assertEquals("Jacky Cheung", result.getArtist());
+    }
+
+    @Test
+    void shouldStripTrackNumberPrefixFromTitle() {
+        AudioMetadata metadata = new AudioMetadata();
+
+        AudioMetadata result = metadataFallbackService.applyFallback(metadata, "music/01. 灰纸蝶.m4a");
+
+        Assertions.assertEquals("灰纸蝶", result.getTitle());
+        Assertions.assertEquals("Unknown Artist", result.getArtist());
+    }
+
+    @Test
+    void shouldHandleFullWidthDashInFileName() {
+        AudioMetadata metadata = new AudioMetadata();
+
+        AudioMetadata result = metadataFallbackService.applyFallback(metadata, "music/梦然－时光海湾.mp3");
+
+        Assertions.assertEquals("时光海湾", result.getTitle());
+        Assertions.assertEquals("梦然", result.getArtist());
+    }
+
+    @Test
+    void shouldInferAlbumFromParentArtistAlbumPattern() {
+        AudioMetadata metadata = new AudioMetadata();
+
+        AudioMetadata result = metadataFallbackService.applyFallback(
+                metadata,
+                "六哲 - 被伤过的心还可以爱谁/六哲 - 爱情好无奈.flac");
+
+        Assertions.assertEquals("爱情好无奈", result.getTitle());
+        Assertions.assertEquals("六哲", result.getArtist());
+        Assertions.assertEquals("被伤过的心还可以爱谁", result.getAlbum());
+    }
+
+    @Test
+    void shouldHandleTrackNoArtistTitleWithoutExtensionConstraint() {
+        AudioMetadata metadata = new AudioMetadata();
+
+        AudioMetadata result = metadataFallbackService.applyFallback(
+                metadata,
+                "六哲 - 被伤过的心还可以爱谁/01-六哲 - 爱情好无奈.mp3");
+
+        Assertions.assertEquals("爱情好无奈", result.getTitle());
+        Assertions.assertEquals("六哲", result.getArtist());
+        Assertions.assertEquals("被伤过的心还可以爱谁", result.getAlbum());
+    }
+
+    @Test
+    void shouldHandleTrackNoArtistTitleWithoutFileExtension() {
+        AudioMetadata metadata = new AudioMetadata();
+
+        AudioMetadata result = metadataFallbackService.applyFallback(
+                metadata,
+                "六哲 - 被伤过的心还可以爱谁/01-六哲 - 爱情好无奈");
+
+        Assertions.assertEquals("爱情好无奈", result.getTitle());
+        Assertions.assertEquals("六哲", result.getArtist());
+        Assertions.assertEquals("被伤过的心还可以爱谁", result.getAlbum());
+    }
+
+    @Test
     void shouldHandleFileAtRootLevel() {
         AudioMetadata metadata = new AudioMetadata();
 
