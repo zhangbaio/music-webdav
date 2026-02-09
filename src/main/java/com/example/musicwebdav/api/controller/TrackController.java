@@ -4,8 +4,10 @@ import com.example.musicwebdav.api.response.ApiResponse;
 import com.example.musicwebdav.api.response.PageResponse;
 import com.example.musicwebdav.api.response.TrackDetailResponse;
 import com.example.musicwebdav.api.response.TrackResponse;
+import com.example.musicwebdav.application.service.TrackPlaybackService;
 import com.example.musicwebdav.application.service.TrackQueryService;
 import java.util.List;
+import javax.servlet.http.HttpServletResponse;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -17,9 +19,11 @@ import org.springframework.web.bind.annotation.RestController;
 public class TrackController {
 
     private final TrackQueryService trackQueryService;
+    private final TrackPlaybackService trackPlaybackService;
 
-    public TrackController(TrackQueryService trackQueryService) {
+    public TrackController(TrackQueryService trackQueryService, TrackPlaybackService trackPlaybackService) {
         this.trackQueryService = trackQueryService;
+        this.trackPlaybackService = trackPlaybackService;
     }
 
     @GetMapping
@@ -51,5 +55,10 @@ public class TrackController {
             return ApiResponse.fail("404", "歌曲不存在");
         }
         return ApiResponse.success(response);
+    }
+
+    @GetMapping("/{id}/stream")
+    public void streamTrack(@PathVariable("id") Long id, HttpServletResponse response) {
+        trackPlaybackService.redirectToWebDav(id, response);
     }
 }

@@ -31,6 +31,8 @@ public class TokenAuthFilter extends OncePerRequestFilter {
                 || uri.startsWith("/v3/api-docs")
                 || uri.startsWith("/swagger-ui")
                 || uri.startsWith("/swagger-ui.html")
+                || uri.startsWith("/music-player.html")
+                || uri.startsWith("/favicon.ico")
                 || uri.startsWith("/error");
     }
 
@@ -39,19 +41,18 @@ public class TokenAuthFilter extends OncePerRequestFilter {
                                     HttpServletResponse response,
                                     FilterChain filterChain) throws ServletException, IOException {
         String configuredToken = properties.getApiToken();
-        String authHeader = request.getHeader("Authorization");
+        String requestToken = extractRequestToken(request);
 
         if (configuredToken == null || configuredToken.trim().isEmpty()) {
             unauthorized(response, "API token is not configured");
             return;
         }
 
-        if (authHeader == null || !authHeader.startsWith(BEARER_PREFIX)) {
+        if (requestToken == null || requestToken.isEmpty()) {
             unauthorized(response, "Missing Bearer token");
             return;
         }
 
-        String requestToken = authHeader.substring(BEARER_PREFIX.length()).trim();
         if (!configuredToken.equals(requestToken)) {
             unauthorized(response, "Invalid token");
             return;
@@ -64,6 +65,19 @@ public class TokenAuthFilter extends OncePerRequestFilter {
                         Collections.singletonList(new SimpleGrantedAuthority("ROLE_API")));
         SecurityContextHolder.getContext().setAuthentication(authentication);
         filterChain.doFilter(request, response);
+    }
+
+    private String extractRequestToken(HttpServletRequest request) {
+        String authHeader = request.getHeader("Authorization");
+        if (authHeader != null && authHeader.startsWith(BEARER_PREFIX)) {
+            return authHeader.substring(BEARER_PREFIX.length()).trim();
+        }
+        String uri = request.getRequestURI();
+        if (uri != null && uri.startsWith("/api/v1/tracks/") && uri.endsWith("/stream")) {
+            String tokenInQuery = request.getParameter("token");
+            return tokenInQuery == null ? null : tokenInQuery.trim();
+        }
+        return null;
     }
 
     private void unauthorized(HttpServletResponse response, String message) throws IOException {

@@ -12,6 +12,7 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.io.RandomAccessFile;
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -126,6 +127,17 @@ public class SardineWebDavClient implements WebDavClient {
         Sardine sardine = SardineFactory.begin(username, password);
         try {
             return doDownloadToTempFile(sardine, fileUrl);
+        } finally {
+            shutdownSafely(sardine);
+        }
+    }
+
+    @Override
+    public void downloadToOutputStream(String username, String password, String fileUrl, OutputStream outputStream) throws IOException {
+        Sardine sardine = SardineFactory.begin(username, password);
+        try (InputStream in = sardine.get(fileUrl)) {
+            copyStream(in, outputStream);
+            outputStream.flush();
         } finally {
             shutdownSafely(sardine);
         }
@@ -343,13 +355,17 @@ public class SardineWebDavClient implements WebDavClient {
         File tempFile = File.createTempFile("webdav-audio-", suffix);
         try (InputStream in = sardine.get(fileUrl);
              FileOutputStream out = new FileOutputStream(tempFile)) {
-            byte[] buffer = new byte[8192];
-            int len;
-            while ((len = in.read(buffer)) != -1) {
-                out.write(buffer, 0, len);
-            }
+            copyStream(in, out);
             out.flush();
             return tempFile;
+        }
+    }
+
+    private void copyStream(InputStream in, OutputStream out) throws IOException {
+        byte[] buffer = new byte[8192];
+        int len;
+        while ((len = in.read(buffer)) != -1) {
+            out.write(buffer, 0, len);
         }
     }
 

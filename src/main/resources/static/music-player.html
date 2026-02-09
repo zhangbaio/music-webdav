@@ -1,0 +1,412 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" href="data:,">
+    <title>Music WebDAV Player</title>
+    <style>
+        :root {
+            --bg: #f4f1eb;
+            --panel: #fffaf2;
+            --ink: #1f2933;
+            --sub: #52606d;
+            --line: #dccfbc;
+            --accent: #1e6f5c;
+            --accent-2: #f4a261;
+            --danger: #b42318;
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            font-family: "Avenir Next", "PingFang SC", "Hiragino Sans GB", sans-serif;
+            color: var(--ink);
+            background:
+                    radial-gradient(1200px 500px at -10% -10%, #f7d9b4 0%, rgba(247, 217, 180, 0) 60%),
+                    radial-gradient(800px 600px at 110% 0%, #c8e6d9 0%, rgba(200, 230, 217, 0) 55%),
+                    var(--bg);
+        }
+
+        .page {
+            max-width: 1080px;
+            margin: 0 auto;
+            padding: 20px 16px 120px;
+        }
+
+        .title {
+            margin: 0 0 6px;
+            font-size: 30px;
+            letter-spacing: .02em;
+        }
+
+        .subtitle {
+            margin: 0 0 16px;
+            color: var(--sub);
+            font-size: 14px;
+        }
+
+        .panel {
+            background: var(--panel);
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            padding: 14px;
+            box-shadow: 0 8px 24px rgba(31, 41, 51, 0.06);
+        }
+
+        .controls {
+            display: grid;
+            grid-template-columns: 1.2fr 1fr auto auto auto;
+            gap: 10px;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+
+        input {
+            width: 100%;
+            border: 1px solid var(--line);
+            border-radius: 10px;
+            height: 38px;
+            padding: 0 12px;
+            font-size: 14px;
+            background: #fff;
+            color: var(--ink);
+        }
+
+        button {
+            border: 0;
+            border-radius: 10px;
+            height: 38px;
+            padding: 0 14px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .btn-main {
+            background: var(--accent);
+            color: #fff;
+        }
+
+        .btn-sub {
+            background: #e6efe9;
+            color: var(--accent);
+        }
+
+        .list-head {
+            display: flex;
+            justify-content: space-between;
+            color: var(--sub);
+            font-size: 13px;
+            margin: 4px 2px 10px;
+        }
+
+        .list {
+            display: grid;
+            gap: 8px;
+        }
+
+        .item {
+            display: grid;
+            grid-template-columns: 1fr auto;
+            gap: 8px;
+            align-items: center;
+            border: 1px solid var(--line);
+            border-radius: 12px;
+            background: #fff;
+            padding: 10px 12px;
+        }
+
+        .meta {
+            min-width: 0;
+        }
+
+        .name {
+            font-size: 15px;
+            font-weight: 600;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .desc {
+            margin-top: 2px;
+            color: var(--sub);
+            font-size: 12px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .btn-play {
+            background: var(--accent-2);
+            color: #fff;
+            min-width: 72px;
+        }
+
+        .status {
+            margin-top: 10px;
+            min-height: 20px;
+            font-size: 13px;
+            color: var(--sub);
+        }
+
+        .status.error {
+            color: var(--danger);
+        }
+
+        .sticky-player {
+            position: fixed;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            border-top: 1px solid var(--line);
+            background: rgba(255, 250, 242, 0.98);
+            backdrop-filter: blur(6px);
+            padding: 10px 14px 12px;
+        }
+
+        .now-playing {
+            max-width: 1080px;
+            margin: 0 auto 8px;
+            font-size: 13px;
+            color: var(--sub);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .player-wrap {
+            max-width: 1080px;
+            margin: 0 auto;
+        }
+
+        audio {
+            width: 100%;
+        }
+
+        @media (max-width: 820px) {
+            .controls {
+                grid-template-columns: 1fr 1fr;
+            }
+            .controls .span-2 {
+                grid-column: span 2;
+            }
+        }
+    </style>
+</head>
+<body>
+<div class="page">
+    <h1 class="title">Music WebDAV Player</h1>
+    <p class="subtitle">读取数据库歌曲列表，点击即可播放（通过后端流式接口）。</p>
+
+    <div class="panel">
+        <div class="controls">
+            <input id="tokenInput" class="span-2" placeholder="Bearer Token（默认 dev-token）" value="dev-token">
+            <input id="keywordInput" class="span-2" placeholder="关键词（标题/歌手/专辑）">
+            <button id="searchBtn" class="btn-main">查询</button>
+            <button id="resetBtn" class="btn-sub">重置</button>
+            <button id="moreBtn" class="btn-sub">更多</button>
+        </div>
+
+        <div class="list-head">
+            <span id="countText">共 0 首</span>
+            <span id="pageText">第 1 页</span>
+        </div>
+
+        <div id="trackList" class="list"></div>
+        <div id="statusText" class="status"></div>
+    </div>
+</div>
+
+<div class="sticky-player">
+    <div id="nowPlaying" class="now-playing">未播放</div>
+    <div class="player-wrap">
+        <audio id="audioPlayer" controls preload="none"></audio>
+    </div>
+</div>
+
+<script>
+    const state = {
+        pageNo: 1,
+        pageSize: 30,
+        total: 0,
+        keyword: "",
+        records: [],
+        currentObjectUrl: null
+    };
+
+    const tokenInput = document.getElementById("tokenInput");
+    const keywordInput = document.getElementById("keywordInput");
+    const searchBtn = document.getElementById("searchBtn");
+    const resetBtn = document.getElementById("resetBtn");
+    const moreBtn = document.getElementById("moreBtn");
+    const trackList = document.getElementById("trackList");
+    const statusText = document.getElementById("statusText");
+    const countText = document.getElementById("countText");
+    const pageText = document.getElementById("pageText");
+    const nowPlaying = document.getElementById("nowPlaying");
+    const audioPlayer = document.getElementById("audioPlayer");
+
+    function setStatus(message, isError) {
+        statusText.textContent = message || "";
+        statusText.classList.toggle("error", !!isError);
+    }
+
+    function authHeaders() {
+        const token = tokenInput.value.trim();
+        return token ? { "Authorization": "Bearer " + token } : {};
+    }
+
+    async function parseErrorMessage(response) {
+        try {
+            const body = await response.json();
+            if (body && body.message) {
+                return body.message;
+            }
+        } catch (e) {
+            // ignore
+        }
+        return "HTTP " + response.status;
+    }
+
+    async function requestJson(url) {
+        const response = await fetch(url, { headers: authHeaders() });
+        if (!response.ok) {
+            throw new Error(await parseErrorMessage(response));
+        }
+        const body = await response.json();
+        if (!body || body.code !== "0") {
+            throw new Error((body && body.message) || "请求失败");
+        }
+        return body.data;
+    }
+
+    function renderList() {
+        trackList.innerHTML = "";
+        if (!state.records.length) {
+            trackList.innerHTML = "<div class=\"item\"><div class=\"meta\"><div class=\"name\">暂无数据</div><div class=\"desc\">请先触发扫描任务</div></div></div>";
+            return;
+        }
+
+        state.records.forEach(track => {
+            const item = document.createElement("div");
+            item.className = "item";
+
+            const meta = document.createElement("div");
+            meta.className = "meta";
+            meta.innerHTML = `
+                <div class="name">${escapeHtml(track.title || "unknown-track")}</div>
+                <div class="desc">${escapeHtml(track.artist || "Unknown Artist")} · ${escapeHtml(track.album || "Unknown Album")}</div>
+            `;
+
+            const playBtn = document.createElement("button");
+            playBtn.className = "btn-play";
+            playBtn.textContent = "播放";
+            playBtn.onclick = () => playTrack(track);
+
+            item.appendChild(meta);
+            item.appendChild(playBtn);
+            trackList.appendChild(item);
+        });
+    }
+
+    function refreshPagerText() {
+        countText.textContent = `共 ${state.total} 首`;
+        pageText.textContent = `第 ${state.pageNo} 页`;
+        moreBtn.disabled = state.records.length >= state.total;
+    }
+
+    async function loadTracks(reset) {
+        if (reset) {
+            state.pageNo = 1;
+            state.records = [];
+        }
+        const params = new URLSearchParams();
+        params.set("pageNo", String(state.pageNo));
+        params.set("pageSize", String(state.pageSize));
+        params.set("sortBy", "updatedAt");
+        params.set("sortOrder", "DESC");
+        if (state.keyword) {
+            params.set("keyword", state.keyword);
+        }
+
+        setStatus("加载歌曲列表中...");
+        try {
+            const data = await requestJson("/api/v1/tracks?" + params.toString());
+            state.total = Number(data.total || 0);
+            const records = Array.isArray(data.records) ? data.records : [];
+            if (reset) {
+                state.records = records;
+            } else {
+                state.records = state.records.concat(records);
+            }
+            renderList();
+            refreshPagerText();
+            setStatus(`加载完成，当前展示 ${state.records.length} 首`);
+        } catch (e) {
+            setStatus("加载失败: " + e.message, true);
+        }
+    }
+
+    async function playTrack(track) {
+        const token = tokenInput.value.trim();
+        if (!token) {
+            setStatus("请先输入 Bearer Token", true);
+            return;
+        }
+        try {
+            const streamUrl = `/api/v1/tracks/${track.id}/stream?token=${encodeURIComponent(token)}`;
+            audioPlayer.src = streamUrl;
+            audioPlayer.load();
+            await audioPlayer.play();
+            nowPlaying.textContent = `正在播放：${track.title || "unknown-track"} - ${track.artist || "Unknown Artist"}`;
+            setStatus("播放中（流式）");
+        } catch (e) {
+            setStatus("播放失败: " + (e && e.message ? e.message : "未知错误"), true);
+        }
+    }
+
+    function escapeHtml(text) {
+        return String(text)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#39;");
+    }
+
+    searchBtn.onclick = () => {
+        state.keyword = keywordInput.value.trim();
+        loadTracks(true);
+    };
+
+    resetBtn.onclick = () => {
+        keywordInput.value = "";
+        state.keyword = "";
+        loadTracks(true);
+    };
+
+    moreBtn.onclick = () => {
+        if (state.records.length >= state.total) {
+            return;
+        }
+        state.pageNo += 1;
+        loadTracks(false);
+    };
+
+    keywordInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+            searchBtn.click();
+        }
+    });
+
+    audioPlayer.addEventListener("error", () => {
+        setStatus("当前浏览器不支持该音频格式或编码，请更换歌曲格式后重试", true);
+    });
+
+    loadTracks(true);
+</script>
+</body>
+</html>

@@ -461,6 +461,7 @@ app:
 - 版本：v2.0
 - 日期：2026-02-09
 - 目标：将扫描架构从「先收集所有文件再逐个处理」重构为**逐目录流式管线**，支持 TB 级库；同时引入 HTTP Range 部分下载、批量 DB 写入、目录级增量判断、断点续扫、进度持久化、封面映射、重复过滤等 8 项优化。
+- 当前落地策略（2026-02-09）：为满足“扫描阶段不下载音频内容”，扫描主链路采用 **WEBDAV_INFER_ONLY** 模式，不执行 `downloadToTempFile/downloadPartialToTempFile`，音频元数据通过文件名与目录规则推断；`duration/bitrate/sampleRate/channels` 等字段允许为空。
 
 ### 17.2 Feature 清单
 

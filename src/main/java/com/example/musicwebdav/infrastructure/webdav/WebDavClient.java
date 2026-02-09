@@ -6,6 +6,7 @@ import com.example.musicwebdav.domain.model.WebDavFileObject;
 import com.github.sardine.Sardine;
 import java.io.File;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.util.List;
 
 public interface WebDavClient {
@@ -15,6 +16,8 @@ public interface WebDavClient {
     List<WebDavFileObject> listFiles(String baseUrl, String username, String password, String rootPath);
 
     File downloadToTempFile(String username, String password, String fileUrl) throws IOException;
+
+    void downloadToOutputStream(String username, String password, String fileUrl, OutputStream outputStream) throws IOException;
 
     /** Create a reusable Sardine session for connection pooling within a scan task. */
     Sardine createSession(String username, String password);

@@ -7,7 +7,6 @@ import com.example.musicwebdav.common.util.HashUtil;
 import com.example.musicwebdav.domain.model.AudioMetadata;
 import com.example.musicwebdav.domain.model.WebDavDirectoryInfo;
 import com.example.musicwebdav.domain.model.WebDavFileObject;
-import com.example.musicwebdav.infrastructure.parser.AudioMetadataParser;
 import com.example.musicwebdav.infrastructure.persistence.entity.DirectorySignatureEntity;
 import com.example.musicwebdav.infrastructure.persistence.entity.ScanCheckpointEntity;
 import com.example.musicwebdav.infrastructure.persistence.entity.TrackEntity;
@@ -19,7 +18,6 @@ import com.example.musicwebdav.infrastructure.persistence.mapper.ScanTaskSeenFil
 import com.example.musicwebdav.infrastructure.persistence.mapper.TrackMapper;
 import com.example.musicwebdav.infrastructure.webdav.WebDavClient;
 import com.github.sardine.Sardine;
-import java.io.File;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.ArrayDeque;
@@ -30,6 +28,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.function.BooleanSupplier;
+import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -39,13 +38,9 @@ import org.springframework.util.StringUtils;
 public class PipelineScanService {
 
     private static final Logger log = LoggerFactory.getLogger(PipelineScanService.class);
-
-    private static final String STATUS_SUCCESS = "SUCCESS";
-    private static final String STATUS_FAILED = "FAILED";
-    private static final String STATUS_SKIPPED = "SKIPPED";
+    private static final Pattern MULTI_SLASH_PATTERN = Pattern.compile("/{2,}");
 
     private final WebDavClient webDavClient;
-    private final AudioMetadataParser audioMetadataParser;
     private final TrackMapper trackMapper;
     private final ScanTaskSeenFileMapper scanTaskSeenFileMapper;
     private final ScanTaskMapper scanTaskMapper;
@@ -58,7 +53,6 @@ public class PipelineScanService {
     private final AppScanProperties appScanProperties;
 
     public PipelineScanService(WebDavClient webDavClient,
-                                AudioMetadataParser audioMetadataParser,
                                 TrackMapper trackMapper,
                                 ScanTaskSeenFileMapper scanTaskSeenFileMapper,
                                 ScanTaskMapper scanTaskMapper,
@@ -70,7 +64,6 @@ public class PipelineScanService {
                                 AppSecurityProperties appSecurityProperties,
                                 AppScanProperties appScanProperties) {
         this.webDavClient = webDavClient;
-        this.audioMetadataParser = audioMetadataParser;
         this.trackMapper = trackMapper;
         this.scanTaskSeenFileMapper = scanTaskSeenFileMapper;
         this.scanTaskMapper = scanTaskMapper;
@@ -97,6 +90,11 @@ public class PipelineScanService {
 
         log.info("PIPELINE_SCAN_START taskId={} configId={} configName={} rootUrl={}",
                 taskId, config.getId(), config.getName(), rootUrl);
+        log.info("PIPELINE_SCAN_METADATA_MODE taskId={} mode=WEBDAV_INFER_ONLY", taskId);
+        // Current API only exposes FULL scan. To avoid false negatives ("full scan but no writes"),
+        // disable directory-signature short-circuit and always process directories.
+        final boolean directorySkipEnabled = false;
+        log.info("PIPELINE_SCAN_DIRECTORY_SKIP taskId={} enabled={}", taskId, directorySkipEnabled);
 
         Sardine session = webDavClient.createSession(config.getUsername(), plainPassword);
         try {
@@ -148,7 +146,7 @@ public class PipelineScanService {
                 }
 
                 // Check directory signature (incremental)
-                if (isDirectoryUnchanged(config.getId(), dirInfo, dirPathMd5)) {
+                if (directorySkipEnabled && isDirectoryUnchanged(config.getId(), dirInfo, dirPathMd5)) {
                     recordSeenFilesForDirectory(taskId, dirInfo, supportedExtensions);
                     tracker.onDirectorySkipped(dirInfo.getRelativePath());
                     logIfNeeded(tracker);
@@ -160,7 +158,7 @@ public class PipelineScanService {
 
                 // Process files in this directory
                 DirProcessResult dirResult = processDirectoryFiles(
-                        taskId, config, session, dirInfo, coverUrl, supportedExtensions);
+                        taskId, config, dirInfo, coverUrl, supportedExtensions);
                 result.addDirResult(dirResult);
 
                 // Update directory signature
@@ -208,7 +206,7 @@ public class PipelineScanService {
     }
 
     private DirProcessResult processDirectoryFiles(Long taskId, WebDavConfigEntity config,
-                                                     Sardine session, WebDavDirectoryInfo dirInfo,
+                                                     WebDavDirectoryInfo dirInfo,
                                                      String coverUrl, Set<String> supportedExtensions) {
         DirProcessResult dirResult = new DirProcessResult();
         List<TrackEntity> trackBatch = new ArrayList<>();
@@ -237,32 +235,8 @@ public class PipelineScanService {
                     continue;
                 }
 
-                // Try partial download for metadata parsing
-                AudioMetadata metadata = null;
-                boolean metadataFallback = false;
-
-                File tempFile = null;
-                try {
-                    long fileSize = file.getSize() != null ? file.getSize() : 0;
-                    tempFile = webDavClient.downloadPartialToTempFile(session, file.getFileUrl(), fileSize,
-                            appScanProperties.getMetadataHeadBytes(), appScanProperties.getMetadataTailBytes());
-                    if (tempFile != null) {
-                        metadata = audioMetadataParser.parse(tempFile);
-                    }
-                } catch (Exception parseEx) {
-                    metadataFallback = true;
-                    log.debug("Partial download/parse failed, using fallback: path={}, error={}",
-                            relativePath, parseEx.getMessage());
-                } finally {
-                    if (tempFile != null && tempFile.exists() && !tempFile.delete()) {
-                        log.debug("Temp file delete failed: {}", tempFile.getAbsolutePath());
-                    }
-                }
-
-                if (metadata == null) {
-                    metadata = new AudioMetadata();
-                    metadataFallback = true;
-                }
+                // Pure WebDAV mode: do not download media bytes, infer metadata from path/dir only.
+                AudioMetadata metadata = new AudioMetadata();
 
                 TrackEntity entity = buildTrackEntity(taskId, config.getId(), relativePath, pathMd5,
                         file, metadata, coverUrl);
@@ -438,7 +412,7 @@ public class PipelineScanService {
             entity.setSourceLastModified(LocalDateTime.ofInstant(file.getLastModified().toInstant(), ZoneId.systemDefault()));
         }
         entity.setSourceSize(file.getSize());
-        entity.setMimeType(file.getMimeType());
+        entity.setMimeType(normalizeMimeType(file.getMimeType()));
         entity.setContentHash(null);
         entity.setTitle(safeMetadata.getTitle());
         entity.setArtist(safeMetadata.getArtist());
@@ -480,11 +454,28 @@ public class PipelineScanService {
         if (value == null) {
             return null;
         }
-        String normalized = value.trim();
+        String normalized = value.trim().replace('\\', '/');
+        normalized = MULTI_SLASH_PATTERN.matcher(normalized).replaceAll("/");
         while (normalized.startsWith("/")) {
             normalized = normalized.substring(1);
         }
+        while (normalized.endsWith("/") && normalized.length() > 1) {
+            normalized = normalized.substring(0, normalized.length() - 1);
+        }
         return normalized;
+    }
+
+    private String normalizeMimeType(String mimeType) {
+        if (!StringUtils.hasText(mimeType)) {
+            return null;
+        }
+        String normalized = mimeType.trim();
+        int semicolonIndex = normalized.indexOf(';');
+        if (semicolonIndex > 0) {
+            normalized = normalized.substring(0, semicolonIndex);
+        }
+        normalized = normalized.trim().toLowerCase(Locale.ROOT);
+        return normalized.isEmpty() ? null : normalized;
     }
 
     private String safeRelativePath(String path) {
