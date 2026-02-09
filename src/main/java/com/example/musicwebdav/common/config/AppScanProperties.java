@@ -26,6 +26,14 @@ public class AppScanProperties {
 
     private String incrementalCron = "0 0 3 * * ?";
 
+    private int dbBatchSize = 50;
+
+    private int progressPersistIntervalSec = 30;
+
+    private int metadataHeadBytes = 131072;
+
+    private int metadataTailBytes = 128;
+
     public Set<String> normalizedAudioExtensions() {
         return audioExtensions.stream()
                 .filter(item -> item != null && !item.trim().isEmpty())

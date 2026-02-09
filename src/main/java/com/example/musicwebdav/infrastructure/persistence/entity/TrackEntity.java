@@ -50,6 +50,8 @@ public class TrackEntity {
 
     private Integer hasCover;
 
+    private String coverArtUrl;
+
     private Integer isDeleted;
 
     private Long lastScanTaskId;

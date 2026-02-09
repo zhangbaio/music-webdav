@@ -27,3 +27,12 @@ databaseChangeLog:
             relativeToChangelogFile: false
             splitStatements: true
             stripComments: false
+  - changeSet:
+      id: 20260209-004-optimization-features
+      author: codex
+      changes:
+        - sqlFile:
+            path: db/changelog/changelog/V4__optimization_features.sql
+            relativeToChangelogFile: false
+            splitStatements: true
+            stripComments: false

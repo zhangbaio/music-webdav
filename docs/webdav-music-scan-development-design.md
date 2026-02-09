@@ -2,8 +2,8 @@
 
 ## 1. 文档信息
 - 文档名称：WebDAV 音频扫描工具开发文档
-- 版本：v1.0
-- 日期：2026-02-08
+- 版本：v2.0
+- 日期：2026-02-09（v2.0 扫描优化）/ 2026-02-08（v1.0 初始版本）
 - 依据文档：`docs/webdav-music-scan-requirements.md`
 
 ## 2. 技术栈适配结论
@@ -93,12 +93,16 @@ src/main/java/com/example/musicwebdav
       ├── exception
       └── util
 src/main/resources
+  ├── mapper/
+  │   ├── TrackMapper.xml              (v2 新增, 批量 upsert)
+  │   └── ScanTaskSeenFileMapper.xml   (v2 新增, 批量 insert)
   └── db/changelog
       ├── db.changelog-master.yaml
       └── changelog/
           ├── V1__init_schema.sql
           ├── V2__add_indexes.sql
-          └── V3__track_source_config_scope.sql
+          ├── V3__track_source_config_scope.sql
+          └── V4__optimization_features.sql  (v2 新增)
 ```
 
 ## 5. 核心数据模型与 DDL（MySQL 5.7）
@@ -448,3 +452,414 @@ app:
 4. 接口鉴权（必须）
 
 其余技术（ShedLock、Quartz、Redis、ES）按规模演进再引入即可。
+
+---
+
+## 17. v2 优化：扫描性能与功能增强
+
+### 17.1 变更概述
+- 版本：v2.0
+- 日期：2026-02-09
+- 目标：将扫描架构从「先收集所有文件再逐个处理」重构为**逐目录流式管线**，支持 TB 级库；同时引入 HTTP Range 部分下载、批量 DB 写入、目录级增量判断、断点续扫、进度持久化、封面映射、重复过滤等 8 项优化。
+
+### 17.2 Feature 清单
+
+| # | Feature | 核心改动 |
+|---|---------|---------|
+| 1 | 文件名/目录推断标题与歌手 | `MetadataFallbackService` 增强 |
+| 2 | 重复歌曲过滤 | 新增 `DuplicateFilterService` |
+| 3 | 目录封面映射 | 新增 `CoverArtDetector` |
+| 4 | 目录级增量判断 | 新增 `directory_signature` 表 |
+| 5 | 扫描进度日志 | 新增 `ScanProgressTracker` |
+| 6 | 检查点与失败重试 | 新增 `scan_checkpoint` 表 |
+| 7 | 进度与状态落盘 | `scan_task` 表新增进度字段 |
+| 8 | TB 级速度优化 | 管线架构 + Range 下载 + 批量 DB + 会话复用 |
+
+### 17.3 核心架构变更：管线扫描
+
+#### Before（v1）
+```
+listFiles() 递归全部目录
+    → 返回 List<WebDavFileObject>（内存爆炸风险）
+    → 逐个下载完整文件（几 MB ~ 几十 MB）
+    → 逐条 DB 操作
+    → 每次新建 Sardine 连接
+```
+
+#### After（v2）
+```
+BFS 逐目录发现
+    → 每个目录立即处理（内存仅持有当前目录文件）
+    → HTTP Range 部分下载（128KB 头 + 128B 尾）
+    → 批量 INSERT...ON DUPLICATE KEY UPDATE
+    → 整个任务复用同一 Sardine 会话
+```
+
+#### 管线主循环伪代码
+```java
+Deque<String> dirQueue = new ArrayDeque<>();
+dirQueue.push(rootUrl);
+
+while (!dirQueue.isEmpty() && !canceled) {
+    WebDavDirectoryInfo dir = webDavClient.listDirectory(session, dirUrl, rootUrl);
+
+    // 入队子目录
+    for (String subdir : dir.getSubdirectoryUrls()) dirQueue.push(subdir);
+
+    // 检查断点续扫 → 跳过已完成目录
+    if (resumedCheckpoints.contains(dirPathMd5)) { recordSeenFiles(dir); continue; }
+
+    // 目录级增量判断 → 签名未变则跳过
+    if (isDirectoryUnchanged(configId, dir)) { recordSeenFiles(dir); continue; }
+
+    // 检测封面
+    String coverUrl = coverArtDetector.detect(dir.getFiles());
+
+    // 处理目录内音频文件 → 批量写 DB
+    processDirectoryFiles(dir, coverUrl, stats);
+
+    // 保存检查点 + 持久化进度
+    saveCheckpoint(dir);
+    persistProgress(stats);
+}
+
+// 后处理：软删除 + 去重
+softDeleteMissing(taskId, configId);
+deduplicateTracks(configId);
+```
+
+核心类：`PipelineScanService.java`，`FullScanService` 委托调用。
+
+### 17.4 Feature 1：文件名/目录推断标题与歌手
+
+**修改文件**：`MetadataFallbackService.java`、`MetadataFallbackServiceTest.java`
+
+#### 推断算法
+1. null/空路径 → 直接返回默认值（`unknown-track` / `Unknown Artist` / `Unknown Album`），不进入模式匹配
+2. 提取 `fileBaseName`（去扩展名）、`parentDir`、`grandparentDir`
+3. 模式匹配文件名：`A - B` 或 `A-B`（dash pattern: `^(.+?)\s*-\s*(.+?)$`）
+4. 消歧义：若某段等于 parentDir → 该段为歌手；否则默认 first=artist, second=title
+5. 无模式匹配时：title = fileBaseName，artist 从目录推断（跳过通用目录名）
+6. album 推断：若 parentDir != artist 且非通用名 → album = parentDir
+
+#### 通用目录名过滤集合
+`music, audio, songs, download, 华语, 粤语, 日语, 韩语, 欧美, pop, rock, jazz, 歌曲, 下载, 音乐, mp3, flac, lossless, 无损, ost, soundtrack, 合集, 精选, 热门` 等
+
+#### 示例
+
+| 路径 | 推断 title | 推断 artist | 推断 album |
+|------|-----------|-------------|-----------|
+| `那英/默.mp3` | 默 | 那英 | Unknown Album |
+| `华语/那英/默.mp3` | 默 | 那英（跳过通用"华语"）| Unknown Album |
+| `那英/默-那英.mp3` | 默 | 那英（parentDir 匹配 segB）| Unknown Album |
+| `那英/那英精选/征服.mp3` | 征服 | 那英精选 | Unknown Album |
+| `陈奕迅 - 十年.mp3` | 十年 | 陈奕迅 | Unknown Album |
+| `songname.mp3`（根目录）| songname | Unknown Artist | Unknown Album |
+
+### 17.5 Feature 2：重复歌曲过滤
+
+**新建文件**：`DuplicateFilterService.java`、`DuplicateGroup.java`
+
+**"同一首歌"定义**：`LOWER(TRIM(title))` + `LOWER(TRIM(artist))` 相同
+
+**算法**（扫描完成后的后处理步骤）：
+1. `GROUP BY` 归一化 (title, artist) `HAVING COUNT > 1` → 找出重复组
+2. 每组内按 `source_size DESC` 排序，保留最大的文件
+3. 其余标记 `is_deleted = 1`
+
+**新增 Mapper 方法**：
+- `TrackMapper.selectDuplicateGroups(configId)` — GROUP BY 查询返回 `DuplicateGroup`
+- `TrackMapper.selectByNormalizedTitleAndArtist(configId, title, artist)` — 获取组内所有 track
+- `TrackMapper.softDeleteByIds(List<Long> ids)` — 批量软删
+
+### 17.6 Feature 3：目录封面映射
+
+**新建文件**：`CoverArtDetector.java`
+
+**匹配策略**（不区分大小写）：
+1. 精确文件名匹配：`cover.jpg/jpeg/png`、`album.jpg/jpeg/png`、`folder.jpg/jpeg/png`、`front.jpg/jpeg/png`、`artwork.jpg/jpeg/png`
+2. 兜底：目录内任意图片文件（`jpg/jpeg/png/bmp/gif/webp`）
+
+**调用时机**：在逐目录处理（管线架构）中，每个目录列出文件时同时检测封面。若 track 无内嵌封面（`hasCover=0`），设置 `coverArtUrl` 为目录封面的 WebDAV URL。
+
+**数据变更**：
+- `TrackEntity` 新增 `coverArtUrl` 字段
+- `TrackDetailResponse` 新增 `coverArtUrl` 字段
+- DDL：`ALTER TABLE track ADD COLUMN cover_art_url VARCHAR(2048) NULL`
+
+### 17.7 Feature 4：目录级增量判断
+
+**新建文件**：`DirectorySignatureEntity.java`、`DirectorySignatureMapper.java`
+
+**目录签名**：`(etag, lastModified, childCount)` 来自 WebDAV PROPFIND 的目录自身属性
+
+**判断流程**：
+```
+对每个目录:
+1. 计算当前签名 (etag, lastModified, childCount)
+2. 查询 directory_signature 表的历史签名
+3. 若三项均相同 → 跳过目录（仍记录 seen_file 防止被软删）
+4. 若不同 → 正常处理，处理后更新签名
+```
+
+**新建表**：
+```sql
+CREATE TABLE directory_signature (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    config_id BIGINT NOT NULL,
+    dir_path VARCHAR(2048) NOT NULL,
+    dir_path_md5 CHAR(32) NOT NULL,
+    dir_etag VARCHAR(255) NULL,
+    dir_last_modified DATETIME NULL,
+    child_count INT NULL,
+    last_verified_at DATETIME NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_dir_sig_config_path (config_id, dir_path_md5)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='目录签名表（增量扫描优化）';
+```
+
+### 17.8 Feature 5：扫描进度日志
+
+**新建文件**：`ScanProgressTracker.java`
+
+**记录维度**：已完成目录/总目录数、已处理文件/总文件数、added/updated/failed/skipped、速度(files/s)、ETA
+
+**触发策略**（节流）：
+- 日志打印：每 30 秒 或 每 10 个目录
+- DB 持久化：每 30 秒 或 每 5 个目录
+
+**日志格式示例**：
+```
+SCAN_PROGRESS dirs=45/120(37.5%) files=1230/3500 added=89 updated=12 skipped=1100 failed=2 dirSkipped=15 speed=15.3 files/s ETA=2m28s
+```
+
+### 17.9 Feature 6：检查点与失败重试
+
+**新建文件**：`ScanCheckpointEntity.java`、`ScanCheckpointMapper.java`
+
+**检查点粒度**：目录级。每完成一个目录，写入 `scan_checkpoint` 表。
+
+**新建表**：
+```sql
+CREATE TABLE scan_checkpoint (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    task_id BIGINT NOT NULL,
+    dir_path VARCHAR(2048) NOT NULL,
+    dir_path_md5 CHAR(32) NOT NULL,
+    status VARCHAR(16) NOT NULL COMMENT 'COMPLETED/FAILED',
+    file_count INT NULL,
+    processed_count INT NULL,
+    failed_count INT NULL,
+    error_message VARCHAR(1000) NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_checkpoint_task_dir (task_id, dir_path_md5)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='扫描检查点表';
+```
+
+**断点续扫流程**：
+1. `CreateScanTaskRequest` 新增可选字段 `resumeFromTaskId`
+2. 创建任务时，加载前次任务的 COMPLETED 检查点集合
+3. 扫描时，若目录 MD5 在检查点集合中 → 跳过（但记录 seen_file）
+4. FAILED 目录重新处理
+
+**清理策略**：
+- `SUCCESS` → 删除检查点
+- `PARTIAL_SUCCESS` / `FAILED` → 保留检查点供下次续扫
+
+### 17.10 Feature 7：进度与状态落盘
+
+**修改文件**：`ScanTaskEntity.java`、`ScanTaskMapper.java`、`ScanTaskDetailResponse.java`
+
+**scan_task 表新增字段**：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `processed_directories` | INT | 已处理目录数 |
+| `total_directories` | INT | 总目录数 |
+| `last_synced_dir` | VARCHAR(2048) | 最后完成的目录路径 |
+| `progress_pct` | INT | 进度百分比 0-100 |
+
+**Mapper 方法**：`ScanTaskMapper.updateProgress(...)` — 仅当 `status='RUNNING'` 时更新
+
+**触发时机**：由 `ScanProgressTracker.shouldPersistProgress()` 控制节流
+
+### 17.11 Feature 8：TB 级速度优化
+
+#### 8a. HTTP Range 部分下载
+
+**问题**：v1 下载完整音频文件（几 MB ~ 几十 MB），仅为解析元数据标签，TB 级库需传输 TB 级数据。
+
+**方案**：只下载文件头部 + 尾部的少量字节，拼成小临时文件给 jaudiotagger 解析。
+
+**音频标签位置**：
+- ID3v2（MP3）：文件开头，通常 < 64KB
+- ID3v1（MP3）：文件末尾 128 bytes
+- FLAC VorbisComment：文件开头，通常 < 64KB
+- M4A/AAC：metadata atoms 通常在文件开头或末尾
+- OGG：文件开头
+
+**实现**：`SardineWebDavClient.downloadPartialToTempFile()`
+```
+1. Range 请求下载前 128KB（覆盖 ID3v2、FLAC、OGG 头部标签）
+2. 若文件 > 128KB，再 Range 请求下载末尾 128 bytes（ID3v1）
+3. 将两段拼成临时文件：头部字节 + 零字节填充到文件实际大小 + 尾部字节
+   （jaudiotagger 需要 File.length() 匹配来定位 ID3v1）
+4. 交给 jaudiotagger 解析
+5. 若 Range 请求失败（服务端不支持 206），回退到文件名推断（Feature 1）
+```
+
+**底层实现**：Sardine 不直接支持 Range，通过反射获取内部 Apache HttpClient 发送 Range header：
+```java
+HttpGet request = new HttpGet(fileUrl);
+request.setHeader("Range", "bytes=0-131071");  // 前 128KB
+HttpResponse response = httpClient.execute(request);
+// 检查 206 Partial Content
+```
+
+**流量对比**：
+
+| 场景 | Before (v1) | After (v2) | 节省 |
+|------|-------------|------------|------|
+| 单首 5MB MP3 | 5 MB | ~128 KB | 97% |
+| TB 级库 100 万首 | ~5 TB | ~125 GB | 97% |
+
+#### 8b. Sardine 会话复用
+
+v1：每次操作 `SardineFactory.begin()` + `shutdown()`
+v2：整个扫描任务复用同一 `Sardine` 实例（内部 HttpClient 自带连接池）
+
+**新增 WebDavClient 接口方法**：
+```java
+Sardine createSession(String username, String password);
+WebDavDirectoryInfo listDirectory(Sardine session, String directoryUrl, String rootUrl);
+File downloadToTempFile(Sardine session, String fileUrl);
+File downloadPartialToTempFile(Sardine session, String fileUrl, long fileSize, int headBytes, int tailBytes);
+String buildRootUrl(String baseUrl, String rootPath);
+void closeSession(Sardine session);
+```
+
+#### 8c. 批量 DB 操作
+
+通过 MyBatis XML mapper 实现批量 INSERT：
+
+**`TrackMapper.xml`** — `batchUpsert(List<TrackEntity>)`：
+```sql
+INSERT INTO track(source_config_id, source_path, source_path_md5, ...)
+VALUES
+  (#{t.sourceConfigId}, #{t.sourcePath}, #{t.sourcePathMd5}, ...),
+  (#{t.sourceConfigId}, #{t.sourcePath}, #{t.sourcePathMd5}, ...),
+  ...
+ON DUPLICATE KEY UPDATE
+  source_etag = VALUES(source_etag), ...
+```
+
+**`ScanTaskSeenFileMapper.xml`** — `batchInsert(taskId, List<String> md5List)`：
+```sql
+INSERT IGNORE INTO scan_task_seen_file(task_id, source_path_md5) VALUES
+  (#{taskId}, #{md5}), (#{taskId}, #{md5}), ...
+```
+
+批大小由 `app.scan.db-batch-size`（默认 50）控制，写入失败自动回退到逐条 upsert。
+
+### 17.12 新增配置项
+
+```yaml
+app:
+  scan:
+    db-batch-size: 50                  # 批量 DB 写入大小
+    progress-persist-interval-sec: 30  # 进度落盘间隔（秒）
+    metadata-head-bytes: 131072        # Range 下载头部字节数（128KB）
+    metadata-tail-bytes: 128           # Range 下载尾部字节数（ID3v1）
+```
+
+### 17.13 数据库迁移
+
+**迁移文件**：`db/changelog/changelog/V4__optimization_features.sql`
+
+**变更内容**：
+1. `ALTER TABLE track ADD COLUMN cover_art_url VARCHAR(2048) NULL`（Feature 3）
+2. `CREATE TABLE directory_signature`（Feature 4）
+3. `CREATE TABLE scan_checkpoint`（Feature 6）
+4. `ALTER TABLE scan_task ADD COLUMN processed_directories / total_directories / last_synced_dir / progress_pct`（Feature 7）
+
+### 17.14 完整文件清单
+
+#### 新建文件（14 个）
+
+| 文件 | 用途 |
+|------|------|
+| `application/service/PipelineScanService.java` | 管线扫描引擎（Feature 8 核心） |
+| `application/service/ScanProgressTracker.java` | 进度追踪（Feature 5/7） |
+| `application/service/DuplicateFilterService.java` | 重复过滤（Feature 2） |
+| `application/service/CoverArtDetector.java` | 封面检测（Feature 3） |
+| `domain/model/WebDavDirectoryInfo.java` | 目录信息模型（Feature 8） |
+| `domain/model/DuplicateGroup.java` | 重复组模型（Feature 2） |
+| `persistence/entity/DirectorySignatureEntity.java` | 目录签名实体（Feature 4） |
+| `persistence/entity/ScanCheckpointEntity.java` | 检查点实体（Feature 6） |
+| `persistence/mapper/DirectorySignatureMapper.java` | 目录签名 Mapper（Feature 4） |
+| `persistence/mapper/ScanCheckpointMapper.java` | 检查点 Mapper（Feature 6） |
+| `resources/mapper/TrackMapper.xml` | 批量 upsert（Feature 8） |
+| `resources/mapper/ScanTaskSeenFileMapper.xml` | 批量 insert seen files（Feature 8） |
+| `resources/db/changelog/changelog/V4__optimization_features.sql` | 数据库迁移 |
+| `test/.../MetadataFallbackServiceTest.java` | 元数据推断单元测试（Feature 1） |
+
+#### 修改文件（16 个）
+
+| 文件 | 变更内容 |
+|------|----------|
+| `MetadataFallbackService.java` | 增强文件名/目录推断逻辑（Feature 1） |
+| `FullScanService.java` | 委托给 PipelineScanService + 传递去重结果（Feature 2/8） |
+| `ScanTaskService.java` | 支持 resumeFromTaskId、成功后清理检查点（Feature 6/7） |
+| `WebDavClient.java` | 新增 listDirectory/createSession/downloadPartialToTempFile 等方法（Feature 8） |
+| `SardineWebDavClient.java` | 实现目录列表、Range 部分下载、会话复用（Feature 8） |
+| `TrackEntity.java` | 新增 coverArtUrl 字段（Feature 3） |
+| `ScanTaskEntity.java` | 新增 processedDirectories/totalDirectories/lastSyncedDir/progressPct 字段（Feature 7） |
+| `TrackMapper.java` | 新增去重查询、批量软删方法（Feature 2） |
+| `ScanTaskMapper.java` | 新增 updateProgress、更新 insert/select 包含新字段（Feature 7） |
+| `ScanTaskSeenFileMapper.java` | 新增 batchInsert（Feature 8） |
+| `AppScanProperties.java` | 新增 dbBatchSize/progressPersistIntervalSec/metadataHeadBytes/metadataTailBytes（Feature 8） |
+| `CreateScanTaskRequest.java` | 新增 resumeFromTaskId 字段（Feature 6） |
+| `ScanTaskDetailResponse.java` | 新增进度字段（Feature 7） |
+| `TrackDetailResponse.java` | 新增 coverArtUrl（Feature 3） |
+| `TrackQueryService.java` | toDetailResponse 包含 coverArtUrl（Feature 3） |
+| `application.yml` / `db.changelog-master.yaml` | 新增配置默认值、追加 V4 changeset |
+
+### 17.15 API 变更
+
+#### 创建扫描任务 `POST /api/v1/scan/tasks`
+新增可选入参：
+```json
+{
+  "taskType": "FULL",
+  "configId": 1,
+  "resumeFromTaskId": 42  // 可选，断点续扫的前次任务ID
+}
+```
+
+#### 查询任务详情 `GET /api/v1/scan/tasks/{id}`
+响应新增字段：
+```json
+{
+  "processedDirectories": 45,
+  "totalDirectories": 120,
+  "lastSyncedDir": "华语/陈奕迅/",
+  "progressPct": 37
+}
+```
+
+#### 查询歌曲详情 `GET /api/v1/tracks/{id}`
+响应新增字段：
+```json
+{
+  "coverArtUrl": "https://webdav.example.com/music/那英/cover.jpg"
+}
+```
+
+### 17.16 验证方案
+1. **Feature 1**：`mvn test` 运行 `MetadataFallbackServiceTest`（10 个用例覆盖中文文件名、目录推断、消歧义、根目录等场景）
+2. **Feature 2-8**：启动应用后通过 Swagger UI 创建扫描任务，观察日志输出
+3. **断点续扫**：创建任务 → 中途取消 → 使用 `resumeFromTaskId` 创建新任务 → 验证跳过已完成目录
+4. **DB 验证**：检查 `directory_signature`、`scan_checkpoint` 表数据
+5. **去重验证**：准备同名歌曲不同大小 → 扫描后验证只保留最大文件
+6. **Range 下载验证**：观察日志中 partial download 相关输出，确认未完整下载文件

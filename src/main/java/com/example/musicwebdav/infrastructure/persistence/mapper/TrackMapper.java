@@ -1,5 +1,6 @@
 package com.example.musicwebdav.infrastructure.persistence.mapper;
 
+import com.example.musicwebdav.domain.model.DuplicateGroup;
 import com.example.musicwebdav.infrastructure.persistence.entity.TrackEntity;
 import java.util.List;
 import org.apache.ibatis.annotations.Insert;
@@ -14,11 +15,11 @@ public interface TrackMapper {
     @Insert("INSERT INTO track("
             + "source_config_id, source_path, source_path_md5, source_etag, source_last_modified, source_size, mime_type, content_hash, "
             + "title, artist, album, album_artist, track_no, disc_no, `year`, genre, duration_sec, bitrate, sample_rate, channels, "
-            + "has_cover, is_deleted, last_scan_task_id"
+            + "has_cover, cover_art_url, is_deleted, last_scan_task_id"
             + ") VALUES ("
             + "#{sourceConfigId}, #{sourcePath}, #{sourcePathMd5}, #{sourceEtag}, #{sourceLastModified}, #{sourceSize}, #{mimeType}, #{contentHash}, "
             + "#{title}, #{artist}, #{album}, #{albumArtist}, #{trackNo}, #{discNo}, #{year}, #{genre}, #{durationSec}, #{bitrate}, #{sampleRate}, #{channels}, "
-            + "#{hasCover}, 0, #{lastScanTaskId}"
+            + "#{hasCover}, #{coverArtUrl}, 0, #{lastScanTaskId}"
             + ") ON DUPLICATE KEY UPDATE "
             + "source_config_id = VALUES(source_config_id), "
             + "source_path = VALUES(source_path), "
@@ -40,6 +41,7 @@ public interface TrackMapper {
             + "sample_rate = VALUES(sample_rate), "
             + "channels = VALUES(channels), "
             + "has_cover = VALUES(has_cover), "
+            + "cover_art_url = VALUES(cover_art_url), "
             + "is_deleted = 0, "
             + "last_scan_task_id = VALUES(last_scan_task_id), "
             + "updated_at = NOW()")
@@ -146,4 +148,30 @@ public interface TrackMapper {
             + "OR album LIKE CONCAT('%', #{keyword}, '%')) "
             + "ORDER BY updated_at DESC LIMIT #{limit}")
     List<TrackEntity> search(@Param("keyword") String keyword, @Param("limit") int limit);
+
+    // --- Feature 2: Duplicate filtering ---
+
+    @Select("SELECT LOWER(TRIM(title)) AS normalizedTitle, LOWER(TRIM(artist)) AS normalizedArtist, COUNT(*) AS count "
+            + "FROM track WHERE is_deleted = 0 AND source_config_id = #{configId} "
+            + "GROUP BY LOWER(TRIM(title)), LOWER(TRIM(artist)) HAVING COUNT(*) > 1")
+    List<DuplicateGroup> selectDuplicateGroups(@Param("configId") Long configId);
+
+    @Select("SELECT id, source_config_id, source_path, source_size, title, artist "
+            + "FROM track WHERE is_deleted = 0 AND source_config_id = #{configId} "
+            + "AND LOWER(TRIM(title)) = #{normalizedTitle} AND LOWER(TRIM(artist)) = #{normalizedArtist}")
+    List<TrackEntity> selectByNormalizedTitleAndArtist(@Param("configId") Long configId,
+                                                       @Param("normalizedTitle") String normalizedTitle,
+                                                       @Param("normalizedArtist") String normalizedArtist);
+
+    @Update("<script>"
+            + "UPDATE track SET is_deleted = 1, updated_at = NOW() WHERE id IN "
+            + "<foreach item='id' collection='ids' open='(' separator=',' close=')'>"
+            + "#{id}"
+            + "</foreach>"
+            + "</script>")
+    int softDeleteByIds(@Param("ids") List<Long> ids);
+
+    // --- Feature 8: Batch operations (defined in TrackMapper.xml) ---
+
+    int batchUpsert(@Param("list") List<TrackEntity> list);
 }

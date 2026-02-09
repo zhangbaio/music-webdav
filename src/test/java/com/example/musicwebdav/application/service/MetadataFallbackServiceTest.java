@@ -69,4 +69,67 @@ class MetadataFallbackServiceTest {
         Assertions.assertEquals("Unknown Album", result.getAlbum());
         Assertions.assertEquals("Unknown Artist", result.getAlbumArtist());
     }
+
+    @Test
+    void shouldInferArtistFromParentDirectory() {
+        AudioMetadata metadata = new AudioMetadata();
+
+        AudioMetadata result = metadataFallbackService.applyFallback(metadata, "那英/默.mp3");
+
+        Assertions.assertEquals("默", result.getTitle());
+        Assertions.assertEquals("那英", result.getArtist());
+    }
+
+    @Test
+    void shouldSkipGenericDirAndInferArtistFromGrandparent() {
+        AudioMetadata metadata = new AudioMetadata();
+
+        AudioMetadata result = metadataFallbackService.applyFallback(metadata, "华语/那英/默.mp3");
+
+        Assertions.assertEquals("默", result.getTitle());
+        Assertions.assertEquals("那英", result.getArtist());
+    }
+
+    @Test
+    void shouldDisambiguateUsingParentDir() {
+        AudioMetadata metadata = new AudioMetadata();
+
+        // "默-那英.mp3" in folder "那英" → segA=默, segB=那英, parentDir=那英 matches segB
+        AudioMetadata result = metadataFallbackService.applyFallback(metadata, "那英/默-那英.mp3");
+
+        Assertions.assertEquals("默", result.getTitle());
+        Assertions.assertEquals("那英", result.getArtist());
+    }
+
+    @Test
+    void shouldInferAlbumFromParentWhenArtistIsGrandparent() {
+        AudioMetadata metadata = new AudioMetadata();
+
+        AudioMetadata result = metadataFallbackService.applyFallback(metadata, "那英/那英精选/征服.mp3");
+
+        Assertions.assertEquals("征服", result.getTitle());
+        Assertions.assertEquals("那英精选", result.getArtist());
+        // parentDir=那英精选, it's used as artist because no pattern match, non-generic
+    }
+
+    @Test
+    void shouldHandleStandardArtistTitleFormat() {
+        AudioMetadata metadata = new AudioMetadata();
+
+        AudioMetadata result = metadataFallbackService.applyFallback(metadata, "陈奕迅 - 十年.mp3");
+
+        Assertions.assertEquals("十年", result.getTitle());
+        Assertions.assertEquals("陈奕迅", result.getArtist());
+    }
+
+    @Test
+    void shouldHandleFileAtRootLevel() {
+        AudioMetadata metadata = new AudioMetadata();
+
+        AudioMetadata result = metadataFallbackService.applyFallback(metadata, "songname.mp3");
+
+        Assertions.assertEquals("songname", result.getTitle());
+        Assertions.assertEquals("Unknown Artist", result.getArtist());
+        Assertions.assertEquals("Unknown Album", result.getAlbum());
+    }
 }

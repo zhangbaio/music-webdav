@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.musicwebdav.infrastructure.persistence.mapper.TrackMapper">
+    <insert id="batchUpsert" parameterType="java.util.List">
+        INSERT INTO track(source_config_id, source_path, source_path_md5, source_etag,
+            source_last_modified, source_size, mime_type, content_hash,
+            title, artist, album, album_artist, track_no, disc_no, `year`, genre,
+            duration_sec, bitrate, sample_rate, channels, has_cover, cover_art_url,
+            is_deleted, last_scan_task_id)
+        VALUES
+        <foreach collection="list" item="t" separator=",">
+            (#{t.sourceConfigId}, #{t.sourcePath}, #{t.sourcePathMd5}, #{t.sourceEtag},
+             #{t.sourceLastModified}, #{t.sourceSize}, #{t.mimeType}, #{t.contentHash},
+             #{t.title}, #{t.artist}, #{t.album}, #{t.albumArtist}, #{t.trackNo},
+             #{t.discNo}, #{t.year}, #{t.genre}, #{t.durationSec}, #{t.bitrate},
+             #{t.sampleRate}, #{t.channels}, #{t.hasCover}, #{t.coverArtUrl},
+             0, #{t.lastScanTaskId})
+        </foreach>
+        ON DUPLICATE KEY UPDATE
+            source_etag = VALUES(source_etag),
+            source_last_modified = VALUES(source_last_modified),
+            source_size = VALUES(source_size),
+            mime_type = VALUES(mime_type),
+            content_hash = VALUES(content_hash),
+            title = VALUES(title),
+            artist = VALUES(artist),
+            album = VALUES(album),
+            album_artist = VALUES(album_artist),
+            track_no = VALUES(track_no),
+            disc_no = VALUES(disc_no),
+            `year` = VALUES(`year`),
+            genre = VALUES(genre),
+            duration_sec = VALUES(duration_sec),
+            bitrate = VALUES(bitrate),
+            sample_rate = VALUES(sample_rate),
+            channels = VALUES(channels),
+            has_cover = VALUES(has_cover),
+            cover_art_url = VALUES(cover_art_url),
+            is_deleted = 0,
+            last_scan_task_id = VALUES(last_scan_task_id),
+            updated_at = NOW()
+    </insert>
+</mapper>

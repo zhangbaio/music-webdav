@@ -8,8 +8,11 @@ import com.example.musicwebdav.domain.enumtype.TaskType;
 import com.example.musicwebdav.domain.enumtype.TaskStatus;
 import com.example.musicwebdav.infrastructure.persistence.entity.ScanTaskEntity;
 import com.example.musicwebdav.infrastructure.persistence.entity.WebDavConfigEntity;
+import com.example.musicwebdav.infrastructure.persistence.mapper.ScanCheckpointMapper;
 import com.example.musicwebdav.infrastructure.persistence.mapper.ScanTaskMapper;
 import com.example.musicwebdav.infrastructure.persistence.mapper.WebDavConfigMapper;
+import java.util.Collections;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
 import org.slf4j.Logger;
@@ -23,15 +26,18 @@ public class ScanTaskService {
 
     private final ScanTaskMapper scanTaskMapper;
     private final WebDavConfigMapper webDavConfigMapper;
+    private final ScanCheckpointMapper scanCheckpointMapper;
     private final FullScanService fullScanService;
     private final ExecutorService scanTaskExecutor;
 
     public ScanTaskService(ScanTaskMapper scanTaskMapper,
                            WebDavConfigMapper webDavConfigMapper,
+                           ScanCheckpointMapper scanCheckpointMapper,
                            FullScanService fullScanService,
                            ExecutorService scanTaskExecutor) {
         this.scanTaskMapper = scanTaskMapper;
         this.webDavConfigMapper = webDavConfigMapper;
+        this.scanCheckpointMapper = scanCheckpointMapper;
         this.fullScanService = fullScanService;
         this.scanTaskExecutor = scanTaskExecutor;
     }
@@ -45,6 +51,14 @@ public class ScanTaskService {
             throw new BusinessException("400", "当前版本仅支持 FULL 全量扫描");
         }
 
+        // Load resume checkpoints if resumeFromTaskId is specified
+        Set<String> resumedCheckpoints = Collections.emptySet();
+        if (request.getResumeFromTaskId() != null) {
+            resumedCheckpoints = scanCheckpointMapper.selectCompletedDirMd5s(request.getResumeFromTaskId());
+            log.info("SCAN_TASK_RESUME fromTaskId={} checkpointDirs={}",
+                    request.getResumeFromTaskId(), resumedCheckpoints.size());
+        }
+
         ScanTaskEntity entity = new ScanTaskEntity();
         entity.setTaskType(request.getTaskType().name());
         entity.setStatus(TaskStatus.PENDING.name());
@@ -55,11 +69,15 @@ public class ScanTaskService {
         entity.setUpdatedCount(0);
         entity.setDeletedCount(0);
         entity.setFailedCount(0);
+        entity.setProcessedDirectories(0);
+        entity.setTotalDirectories(0);
+        entity.setProgressPct(0);
         scanTaskMapper.insert(entity);
         log.info("SCAN_TASK_CREATED taskId={} type={} configId={}", entity.getId(), entity.getTaskType(), entity.getConfigId());
 
+        final Set<String> finalResumedCheckpoints = resumedCheckpoints;
         try {
-            scanTaskExecutor.submit(() -> executeFullTask(entity.getId(), config));
+            scanTaskExecutor.submit(() -> executeFullTask(entity.getId(), config, finalResumedCheckpoints));
         } catch (RejectedExecutionException e) {
             scanTaskMapper.markFailedBeforeRunning(
                     entity.getId(),
@@ -94,7 +112,7 @@ public class ScanTaskService {
         return true;
     }
 
-    private void executeFullTask(Long taskId, WebDavConfigEntity config) {
+    private void executeFullTask(Long taskId, WebDavConfigEntity config, Set<String> resumedCheckpoints) {
         int runningUpdated = scanTaskMapper.markRunning(taskId, TaskStatus.RUNNING.name());
         if (runningUpdated == 0) {
             String currentStatus = scanTaskMapper.selectStatusById(taskId);
@@ -103,7 +121,7 @@ public class ScanTaskService {
         }
         log.info("SCAN_TASK_RUNNING taskId={} type={} configId={}", taskId, TaskType.FULL.name(), config.getId());
         try {
-            FullScanService.ScanStats stats = fullScanService.scan(taskId, config, () -> isCanceled(taskId));
+            FullScanService.ScanStats stats = fullScanService.scan(taskId, config, () -> isCanceled(taskId), resumedCheckpoints);
             if (stats.isCanceled()) {
                 scanTaskMapper.updateCanceledStats(
                         taskId,
@@ -141,17 +159,20 @@ public class ScanTaskService {
                             stats.getDeletedCount(),
                             stats.getFailedCount(),
                             "任务被取消");
-                    log.info("SCAN_TASK_RESULT taskId={} status={} total={} audio={} added={} updated={} deleted={} failed={}",
-                            taskId, TaskStatus.CANCELED.name(), stats.getTotalFiles(), stats.getAudioFiles(), stats.getAddedCount(),
-                            stats.getUpdatedCount(), stats.getDeletedCount(), stats.getFailedCount());
+                    log.info("SCAN_TASK_RESULT taskId={} status={}", taskId, TaskStatus.CANCELED.name());
                 } else {
                     String currentStatus = scanTaskMapper.selectStatusById(taskId);
                     log.warn("SCAN_TASK_FINISH_REJECTED taskId={} expectStatus=RUNNING currentStatus={}", taskId, currentStatus);
                 }
             } else {
-                log.info("SCAN_TASK_RESULT taskId={} status={} total={} audio={} added={} updated={} deleted={} failed={}",
+                log.info("SCAN_TASK_RESULT taskId={} status={} total={} audio={} added={} updated={} deleted={} failed={} deduped={}",
                         taskId, finalStatus, stats.getTotalFiles(), stats.getAudioFiles(), stats.getAddedCount(),
-                        stats.getUpdatedCount(), stats.getDeletedCount(), stats.getFailedCount());
+                        stats.getUpdatedCount(), stats.getDeletedCount(), stats.getFailedCount(), stats.getDeduplicatedCount());
+
+                // Clean up checkpoints on success
+                if (TaskStatus.SUCCESS.name().equals(finalStatus)) {
+                    scanCheckpointMapper.deleteByTaskId(taskId);
+                }
             }
         } catch (Exception e) {
             log.error("Full scan task failed, taskId={}", taskId, e);
@@ -199,6 +220,10 @@ public class ScanTaskService {
                 nullSafeInt(entity.getUpdatedCount()),
                 nullSafeInt(entity.getDeletedCount()),
                 nullSafeInt(entity.getFailedCount()),
+                entity.getProcessedDirectories(),
+                entity.getTotalDirectories(),
+                entity.getLastSyncedDir(),
+                entity.getProgressPct(),
                 entity.getErrorSummary()
         );
     }

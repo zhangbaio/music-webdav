@@ -31,5 +31,6 @@ public class TrackDetailResponse {
     private Integer sampleRate;
     private Integer channels;
     private Integer hasCover;
+    private String coverArtUrl;
     private LocalDateTime updatedAt;
 }

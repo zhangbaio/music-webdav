@@ -22,5 +22,9 @@ public class ScanTaskDetailResponse {
     private int updatedCount;
     private int deletedCount;
     private int failedCount;
+    private Integer processedDirectories;
+    private Integer totalDirectories;
+    private String lastSyncedDir;
+    private Integer progressPct;
     private String errorSummary;
 }

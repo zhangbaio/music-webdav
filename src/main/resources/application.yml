@@ -48,6 +48,10 @@ app:
     retry-backoff-ms: 500
     audio-extensions: mp3,flac,m4a,aac,ogg,wav
     incremental-cron: "0 0 3 * * ?"
+    db-batch-size: 50
+    progress-persist-interval-sec: 30
+    metadata-head-bytes: 131072
+    metadata-tail-bytes: 128
   security:
     api-token: dev-token
     encrypt-key: changeit12345678

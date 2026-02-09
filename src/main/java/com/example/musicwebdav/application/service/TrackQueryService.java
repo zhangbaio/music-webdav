@@ -97,6 +97,7 @@ public class TrackQueryService {
                 entity.getSampleRate(),
                 entity.getChannels(),
                 entity.getHasCover(),
+                entity.getCoverArtUrl(),
                 entity.getUpdatedAt()
         );
     }

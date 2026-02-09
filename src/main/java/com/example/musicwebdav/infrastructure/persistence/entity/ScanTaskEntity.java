@@ -30,6 +30,14 @@ public class ScanTaskEntity {
 
     private Integer failedCount;
 
+    private Integer processedDirectories;
+
+    private Integer totalDirectories;
+
+    private String lastSyncedDir;
+
+    private Integer progressPct;
+
     private String errorSummary;
 
     private LocalDateTime createdAt;
