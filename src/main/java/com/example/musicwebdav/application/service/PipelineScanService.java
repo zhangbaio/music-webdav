@@ -434,7 +434,8 @@ public class PipelineScanService {
         entity.setSampleRate(safeMetadata.getSampleRate());
         entity.setChannels(safeMetadata.getChannels());
         entity.setHasCover(Boolean.TRUE.equals(safeMetadata.getHasCover()) ? 1 : 0);
-        if (entity.getHasCover() == 0 && coverUrl != null) {
+        if (entity.getHasCover() == 0 && StringUtils.hasText(coverUrl)) {
+            entity.setHasCover(1);
             entity.setCoverArtUrl(coverUrl);
         }
         entity.setHasLyric(StringUtils.hasText(lyricPath) ? 1 : 0);

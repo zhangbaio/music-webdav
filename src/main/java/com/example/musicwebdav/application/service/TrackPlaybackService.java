@@ -99,8 +99,7 @@ public class TrackPlaybackService {
             throw new BusinessException("404", "歌曲不存在");
         }
 
-        if (track.getHasCover() == null || track.getHasCover() != 1
-                || !StringUtils.hasText(track.getCoverArtUrl())) {
+        if (!StringUtils.hasText(track.getCoverArtUrl())) {
             throw new BusinessException("404", "封面不存在");
         }
 

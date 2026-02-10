@@ -25,7 +25,7 @@ public class CoverArtDetector {
 
     /**
      * Detect cover art in a list of files within a directory.
-     * Returns the WebDAV URL of the cover image, or null if none found.
+     * Returns the relative path of the cover image, or null if none found.
      */
     public String detectCoverInDirectory(List<WebDavFileObject> filesInDir) {
         if (filesInDir == null || filesInDir.isEmpty()) {
@@ -36,7 +36,7 @@ public class CoverArtDetector {
         for (WebDavFileObject file : filesInDir) {
             String filename = extractFilename(file.getRelativePath());
             if (filename != null && COVER_FILENAMES.contains(filename.toLowerCase(Locale.ROOT))) {
-                return file.getFileUrl();
+                return file.getRelativePath();
             }
         }
 
@@ -44,7 +44,7 @@ public class CoverArtDetector {
         for (WebDavFileObject file : filesInDir) {
             String ext = extractExtension(file.getRelativePath());
             if (ext != null && IMAGE_EXTENSIONS.contains(ext.toLowerCase(Locale.ROOT))) {
-                return file.getFileUrl();
+                return file.getRelativePath();
             }
         }
 

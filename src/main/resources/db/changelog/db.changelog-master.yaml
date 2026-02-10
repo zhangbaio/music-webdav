@@ -45,3 +45,12 @@ databaseChangeLog:
             relativeToChangelogFile: false
             splitStatements: true
             stripComments: false
+  - changeSet:
+      id: 20260210-006-playlist-favorite
+      author: codex
+      changes:
+        - sqlFile:
+            path: db/changelog/changelog/V6__playlist_and_favorite.sql
+            relativeToChangelogFile: false
+            splitStatements: true
+            stripComments: false
