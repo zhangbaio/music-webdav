@@ -71,7 +71,8 @@ public class TrackQueryService {
                 entity.getArtist(),
                 entity.getAlbum(),
                 entity.getSourcePath(),
-                entity.getDurationSec()
+                entity.getDurationSec(),
+                entity.getHasLyric()
         );
     }
 
@@ -98,6 +99,8 @@ public class TrackQueryService {
                 entity.getChannels(),
                 entity.getHasCover(),
                 entity.getCoverArtUrl(),
+                entity.getHasLyric(),
+                entity.getLyricPath(),
                 entity.getUpdatedAt()
         );
     }

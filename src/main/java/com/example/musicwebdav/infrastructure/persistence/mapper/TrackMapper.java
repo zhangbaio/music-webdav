@@ -15,11 +15,11 @@ public interface TrackMapper {
     @Insert("INSERT INTO track("
             + "source_config_id, source_path, source_path_md5, source_etag, source_last_modified, source_size, mime_type, content_hash, "
             + "title, artist, album, album_artist, track_no, disc_no, `year`, genre, duration_sec, bitrate, sample_rate, channels, "
-            + "has_cover, cover_art_url, is_deleted, last_scan_task_id"
+            + "has_cover, cover_art_url, has_lyric, lyric_path, is_deleted, last_scan_task_id"
             + ") VALUES ("
             + "#{sourceConfigId}, #{sourcePath}, #{sourcePathMd5}, #{sourceEtag}, #{sourceLastModified}, #{sourceSize}, #{mimeType}, #{contentHash}, "
             + "#{title}, #{artist}, #{album}, #{albumArtist}, #{trackNo}, #{discNo}, #{year}, #{genre}, #{durationSec}, #{bitrate}, #{sampleRate}, #{channels}, "
-            + "#{hasCover}, #{coverArtUrl}, 0, #{lastScanTaskId}"
+            + "#{hasCover}, #{coverArtUrl}, #{hasLyric}, #{lyricPath}, 0, #{lastScanTaskId}"
             + ") ON DUPLICATE KEY UPDATE "
             + "source_config_id = VALUES(source_config_id), "
             + "source_path = VALUES(source_path), "
@@ -42,6 +42,8 @@ public interface TrackMapper {
             + "channels = VALUES(channels), "
             + "has_cover = VALUES(has_cover), "
             + "cover_art_url = VALUES(cover_art_url), "
+            + "has_lyric = VALUES(has_lyric), "
+            + "lyric_path = VALUES(lyric_path), "
             + "is_deleted = 0, "
             + "last_scan_task_id = VALUES(last_scan_task_id), "
             + "updated_at = NOW()")
@@ -49,7 +51,7 @@ public interface TrackMapper {
 
     @Select("SELECT id, source_config_id, source_path, source_path_md5, source_etag, source_last_modified, source_size, mime_type, content_hash, "
             + "title, artist, album, album_artist, track_no, disc_no, `year`, genre, duration_sec, bitrate, sample_rate, channels, "
-            + "has_cover, is_deleted, last_scan_task_id, created_at, updated_at "
+            + "has_cover, cover_art_url, has_lyric, lyric_path, is_deleted, last_scan_task_id, created_at, updated_at "
             + "FROM track WHERE source_config_id = #{sourceConfigId} AND source_path_md5 = #{sourcePathMd5}")
     TrackEntity selectByConfigAndPathMd5(@Param("sourceConfigId") Long sourceConfigId,
                                          @Param("sourcePathMd5") String sourcePathMd5);
@@ -61,7 +63,7 @@ public interface TrackMapper {
     int softDeleteByTaskId(@Param("taskId") Long taskId, @Param("configId") Long configId);
 
     @Select("<script>"
-            + "SELECT id, title, artist, album, source_path, duration_sec "
+            + "SELECT id, title, artist, album, source_path, duration_sec, has_lyric "
             + "FROM track "
             + "WHERE is_deleted = 0 "
             + "<if test='keyword != null and keyword != \"\"'>"
@@ -137,11 +139,11 @@ public interface TrackMapper {
 
     @Select("SELECT id, source_config_id, source_path, source_path_md5, source_etag, source_last_modified, source_size, mime_type, content_hash, "
             + "title, artist, album, album_artist, track_no, disc_no, `year`, genre, duration_sec, bitrate, sample_rate, channels, "
-            + "has_cover, is_deleted, last_scan_task_id, created_at, updated_at "
+            + "has_cover, cover_art_url, has_lyric, lyric_path, is_deleted, last_scan_task_id, created_at, updated_at "
             + "FROM track WHERE id = #{id} AND is_deleted = 0")
     TrackEntity selectById(@Param("id") Long id);
 
-    @Select("SELECT id, title, artist, album, source_path, duration_sec "
+    @Select("SELECT id, title, artist, album, source_path, duration_sec, has_lyric "
             + "FROM track WHERE is_deleted = 0 "
             + "AND (title LIKE CONCAT('%', #{keyword}, '%') "
             + "OR artist LIKE CONCAT('%', #{keyword}, '%') "

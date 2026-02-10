@@ -23,9 +23,11 @@ import java.time.ZoneId;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.BooleanSupplier;
@@ -82,6 +84,7 @@ public class PipelineScanService {
         ScanResult result = new ScanResult();
         String plainPassword = AesCryptoUtil.decrypt(config.getPasswordEnc(), appSecurityProperties.getEncryptKey());
         Set<String> supportedExtensions = appScanProperties.normalizedAudioExtensions();
+        Set<String> lyricExtensions = appScanProperties.normalizedLyricExtensions();
         if (supportedExtensions.isEmpty()) {
             throw new IllegalStateException("app.scan.audio-extensions 配置为空");
         }
@@ -159,7 +162,7 @@ public class PipelineScanService {
 
                 // Process files in this directory
                 DirProcessResult dirResult = processDirectoryFiles(
-                        taskId, config, dirInfo, coverUrl, supportedExtensions);
+                        taskId, config, dirInfo, coverUrl, supportedExtensions, lyricExtensions);
                 result.addDirResult(dirResult);
 
                 // Update directory signature
@@ -208,10 +211,12 @@ public class PipelineScanService {
 
     private DirProcessResult processDirectoryFiles(Long taskId, WebDavConfigEntity config,
                                                      WebDavDirectoryInfo dirInfo,
-                                                     String coverUrl, Set<String> supportedExtensions) {
+                                                     String coverUrl, Set<String> supportedExtensions,
+                                                     Set<String> lyricExtensions) {
         DirProcessResult dirResult = new DirProcessResult();
         List<TrackEntity> trackBatch = new ArrayList<>();
         List<String> seenMd5Batch = new ArrayList<>();
+        Map<String, String> lyricPathIndex = buildLyricPathIndex(dirInfo.getFiles(), lyricExtensions);
         int dbBatchSize = Math.max(10, appScanProperties.getDbBatchSize());
 
         for (WebDavFileObject file : dirInfo.getFiles()) {
@@ -234,8 +239,9 @@ public class PipelineScanService {
                 // Pure WebDAV infer mode may evolve over time; recompute metadata from path/dir and
                 // upsert when inferred fields differ, even if file fingerprint is unchanged.
                 AudioMetadata metadata = new AudioMetadata();
+                String lyricPath = resolveLyricPath(relativePath, lyricPathIndex);
                 TrackEntity entity = buildTrackEntity(taskId, config.getId(), relativePath, pathMd5,
-                        file, metadata, coverUrl);
+                        file, metadata, coverUrl, lyricPath);
                 if (sameFingerprint(existing, file) && sameTrackMetadata(existing, entity)) {
                     dirResult.skipped++;
                     continue;
@@ -402,7 +408,7 @@ public class PipelineScanService {
 
     private TrackEntity buildTrackEntity(Long taskId, Long configId, String relativePath,
                                           String pathMd5, WebDavFileObject file,
-                                          AudioMetadata metadata, String coverUrl) {
+                                          AudioMetadata metadata, String coverUrl, String lyricPath) {
         AudioMetadata safeMetadata = metadataFallbackService.applyFallback(metadata, relativePath);
         TrackEntity entity = new TrackEntity();
         entity.setSourceConfigId(configId);
@@ -431,6 +437,8 @@ public class PipelineScanService {
         if (entity.getHasCover() == 0 && coverUrl != null) {
             entity.setCoverArtUrl(coverUrl);
         }
+        entity.setHasLyric(StringUtils.hasText(lyricPath) ? 1 : 0);
+        entity.setLyricPath(StringUtils.hasText(lyricPath) ? lyricPath : null);
         entity.setLastScanTaskId(taskId);
         return entity;
     }
@@ -462,6 +470,7 @@ public class PipelineScanService {
                 && sameText(existing.getGenre(), candidate.getGenre())
                 && sameText(existing.getMimeType(), candidate.getMimeType())
                 && sameText(existing.getCoverArtUrl(), candidate.getCoverArtUrl())
+                && sameText(existing.getLyricPath(), candidate.getLyricPath())
                 && Objects.equals(existing.getTrackNo(), candidate.getTrackNo())
                 && Objects.equals(existing.getDiscNo(), candidate.getDiscNo())
                 && Objects.equals(existing.getYear(), candidate.getYear())
@@ -469,7 +478,8 @@ public class PipelineScanService {
                 && Objects.equals(existing.getBitrate(), candidate.getBitrate())
                 && Objects.equals(existing.getSampleRate(), candidate.getSampleRate())
                 && Objects.equals(existing.getChannels(), candidate.getChannels())
-                && Objects.equals(existing.getHasCover(), candidate.getHasCover());
+                && Objects.equals(existing.getHasCover(), candidate.getHasCover())
+                && Objects.equals(existing.getHasLyric(), candidate.getHasLyric());
     }
 
     private boolean sameText(String left, String right) {
@@ -516,12 +526,78 @@ public class PipelineScanService {
     }
 
     private boolean isAudioFile(String relativePath, Set<String> supportedExtensions) {
-        int idx = relativePath.lastIndexOf('.');
-        if (idx < 0 || idx >= relativePath.length() - 1) {
+        String ext = extractFileExtension(relativePath);
+        if (!StringUtils.hasText(ext)) {
             return false;
         }
-        String ext = relativePath.substring(idx + 1).toLowerCase(Locale.ROOT);
         return supportedExtensions.contains(ext);
+    }
+
+    private Map<String, String> buildLyricPathIndex(List<WebDavFileObject> files, Set<String> lyricExtensions) {
+        Map<String, String> lyricPathIndex = new HashMap<>();
+        if (lyricExtensions == null || lyricExtensions.isEmpty()) {
+            return lyricPathIndex;
+        }
+        for (WebDavFileObject file : files) {
+            String relativePath = normalizeRelativePath(file.getRelativePath());
+            if (!StringUtils.hasText(relativePath)) {
+                continue;
+            }
+            String extension = extractFileExtension(relativePath);
+            if (!StringUtils.hasText(extension) || !lyricExtensions.contains(extension)) {
+                continue;
+            }
+            String lyricKey = buildPathWithoutExtensionKey(relativePath);
+            if (!StringUtils.hasText(lyricKey)) {
+                continue;
+            }
+            lyricPathIndex.putIfAbsent(lyricKey, relativePath);
+        }
+        return lyricPathIndex;
+    }
+
+    private String resolveLyricPath(String audioRelativePath, Map<String, String> lyricPathIndex) {
+        if (!StringUtils.hasText(audioRelativePath) || lyricPathIndex == null || lyricPathIndex.isEmpty()) {
+            return null;
+        }
+        String lyricKey = buildPathWithoutExtensionKey(audioRelativePath);
+        if (!StringUtils.hasText(lyricKey)) {
+            return null;
+        }
+        return lyricPathIndex.get(lyricKey);
+    }
+
+    private String buildPathWithoutExtensionKey(String relativePath) {
+        String basePath = stripFileExtension(relativePath);
+        if (!StringUtils.hasText(basePath)) {
+            return null;
+        }
+        return basePath.toLowerCase(Locale.ROOT);
+    }
+
+    private String stripFileExtension(String relativePath) {
+        if (!StringUtils.hasText(relativePath)) {
+            return null;
+        }
+        int idx = relativePath.lastIndexOf('.');
+        if (idx < 0) {
+            return relativePath;
+        }
+        if (idx == 0) {
+            return null;
+        }
+        return relativePath.substring(0, idx);
+    }
+
+    private String extractFileExtension(String relativePath) {
+        if (!StringUtils.hasText(relativePath)) {
+            return null;
+        }
+        int idx = relativePath.lastIndexOf('.');
+        if (idx < 0 || idx >= relativePath.length() - 1) {
+            return null;
+        }
+        return relativePath.substring(idx + 1).toLowerCase(Locale.ROOT);
     }
 
     private String normalizeUrl(String url) {

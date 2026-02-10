@@ -32,5 +32,7 @@ public class TrackDetailResponse {
     private Integer channels;
     private Integer hasCover;
     private String coverArtUrl;
+    private Integer hasLyric;
+    private String lyricPath;
     private LocalDateTime updatedAt;
 }

@@ -61,4 +61,20 @@ public class TrackController {
     public void streamTrack(@PathVariable("id") Long id, HttpServletResponse response) {
         trackPlaybackService.redirectToWebDav(id, response);
     }
+
+    @GetMapping("/{id}/stream-proxy")
+    public void streamTrackProxy(@PathVariable("id") Long id, HttpServletResponse response) {
+        trackPlaybackService.proxyTrackStream(id, response);
+    }
+
+    @GetMapping("/{id}/cover")
+    public void coverArt(@PathVariable("id") Long id, HttpServletResponse response) {
+        trackPlaybackService.proxyCoverArt(id, response);
+    }
+
+    @GetMapping("/{id}/lyric")
+    public ApiResponse<String> lyric(@PathVariable("id") Long id) {
+        String content = trackPlaybackService.getLyricContent(id);
+        return ApiResponse.success(content);
+    }
 }

@@ -15,4 +15,5 @@ public class TrackResponse {
     private String album;
     private String sourcePath;
     private Integer durationSec;
+    private Integer hasLyric;
 }

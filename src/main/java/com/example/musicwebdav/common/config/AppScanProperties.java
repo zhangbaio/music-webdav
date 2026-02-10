@@ -24,6 +24,8 @@ public class AppScanProperties {
 
     private List<String> audioExtensions = new ArrayList<>(Arrays.asList("mp3", "flac", "m4a", "aac", "ogg", "wav"));
 
+    private List<String> lyricExtensions = new ArrayList<>(Arrays.asList("lrc", "txt"));
+
     private String incrementalCron = "0 0 3 * * ?";
 
     private int dbBatchSize = 50;
@@ -36,6 +38,13 @@ public class AppScanProperties {
 
     public Set<String> normalizedAudioExtensions() {
         return audioExtensions.stream()
+                .filter(item -> item != null && !item.trim().isEmpty())
+                .map(item -> item.trim().toLowerCase(Locale.ROOT).replaceFirst("^\\.", ""))
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+    }
+
+    public Set<String> normalizedLyricExtensions() {
+        return lyricExtensions.stream()
                 .filter(item -> item != null && !item.trim().isEmpty())
                 .map(item -> item.trim().toLowerCase(Locale.ROOT).replaceFirst("^\\.", ""))
                 .collect(Collectors.toCollection(LinkedHashSet::new));

@@ -52,6 +52,10 @@ public class TrackEntity {
 
     private String coverArtUrl;
 
+    private Integer hasLyric;
+
+    private String lyricPath;
+
     private Integer isDeleted;
 
     private Long lastScanTaskId;
