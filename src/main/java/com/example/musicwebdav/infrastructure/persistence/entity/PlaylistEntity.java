@@ -14,6 +14,8 @@ public class PlaylistEntity {
 
     private String systemCode;
 
+    private Integer sortNo;
+
     private Integer isDeleted;
 
     private Integer trackCount;

@@ -14,6 +14,7 @@ public class PlaylistResponse {
     private String name;
     private String playlistType;
     private String systemCode;
+    private Integer sortNo;
     private Integer trackCount;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;

@@ -2,11 +2,17 @@ package com.example.musicwebdav.api.controller;
 
 import com.example.musicwebdav.api.request.AddPlaylistTracksRequest;
 import com.example.musicwebdav.api.request.CreatePlaylistRequest;
+import com.example.musicwebdav.api.request.ReorderPlaylistTracksRequest;
+import com.example.musicwebdav.api.request.ReorderPlaylistsRequest;
 import com.example.musicwebdav.api.request.RenamePlaylistRequest;
+import com.example.musicwebdav.api.request.TrackIdsRequest;
 import com.example.musicwebdav.api.response.AddPlaylistTracksResponse;
 import com.example.musicwebdav.api.response.ApiResponse;
 import com.example.musicwebdav.api.response.PageResponse;
+import com.example.musicwebdav.api.response.PlaylistCleanupResponse;
 import com.example.musicwebdav.api.response.PlaylistResponse;
+import com.example.musicwebdav.api.response.PlaylistTrackOperationResponse;
+import com.example.musicwebdav.api.response.PlaylistTrackOrderResponse;
 import com.example.musicwebdav.api.response.TrackResponse;
 import com.example.musicwebdav.application.service.PlaylistService;
 import java.util.List;
@@ -16,6 +22,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -39,6 +46,12 @@ public class PlaylistController {
     @GetMapping
     public ApiResponse<List<PlaylistResponse>> listPlaylists() {
         return ApiResponse.success(playlistService.listPlaylists());
+    }
+
+    @PutMapping("/reorder")
+    public ApiResponse<List<PlaylistResponse>> reorderPlaylists(
+            @Valid @RequestBody ReorderPlaylistsRequest request) {
+        return ApiResponse.success(playlistService.reorderPlaylists(request.getPlaylistIds()));
     }
 
     @PatchMapping("/{id}")
@@ -67,10 +80,28 @@ public class PlaylistController {
         return ApiResponse.success(playlistService.addTracks(id, request.getTrackIds()));
     }
 
+    @PostMapping("/{id}/tracks/remove")
+    public ApiResponse<PlaylistTrackOperationResponse> removeTracks(@PathVariable("id") Long id,
+                                                                    @Valid @RequestBody TrackIdsRequest request) {
+        return ApiResponse.success(playlistService.removeTracks(id, request.getTrackIds()));
+    }
+
+    @PutMapping("/{id}/tracks/reorder")
+    public ApiResponse<PlaylistTrackOrderResponse> reorderTracks(@PathVariable("id") Long id,
+                                                                 @Valid @RequestBody ReorderPlaylistTracksRequest request) {
+        return ApiResponse.success(playlistService.reorderTracks(id, request.getTrackIds()));
+    }
+
     @DeleteMapping("/{id}/tracks/{trackId}")
     public ApiResponse<String> removeTrack(@PathVariable("id") Long id,
                                            @PathVariable("trackId") Long trackId) {
         boolean removed = playlistService.removeTrack(id, trackId);
         return ApiResponse.success(removed ? "REMOVED" : "NOT_FOUND");
+    }
+
+    @PostMapping("/cleanup")
+    public ApiResponse<PlaylistCleanupResponse> cleanup(
+            @RequestParam(value = "normalizeOrderNo", defaultValue = "true") boolean normalizeOrderNo) {
+        return ApiResponse.success(playlistService.cleanupPlaylistData(normalizeOrderNo));
     }
 }

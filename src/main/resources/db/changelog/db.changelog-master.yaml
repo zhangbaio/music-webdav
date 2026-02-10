@@ -54,3 +54,12 @@ databaseChangeLog:
             relativeToChangelogFile: false
             splitStatements: true
             stripComments: false
+  - changeSet:
+      id: 20260210-007-playlist-p1
+      author: codex
+      changes:
+        - sqlFile:
+            path: db/changelog/changelog/V7__playlist_p1_features.sql
+            relativeToChangelogFile: false
+            splitStatements: true
+            stripComments: false

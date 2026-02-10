@@ -53,6 +53,10 @@ app:
     progress-persist-interval-sec: 30
     metadata-head-bytes: 131072
     metadata-tail-bytes: 128
+  playlist:
+    cleanup-enabled: false
+    cleanup-cron: "0 30 4 * * ?"
+    cleanup-normalize-order-no: true
   security:
     api-token: dev-token
     encrypt-key: changeit12345678
