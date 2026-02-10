@@ -36,3 +36,12 @@ databaseChangeLog:
             relativeToChangelogFile: false
             splitStatements: true
             stripComments: false
+  - changeSet:
+      id: 20260209-005-track-lyric-fields
+      author: codex
+      changes:
+        - sqlFile:
+            path: db/changelog/changelog/V5__track_lyric_fields.sql
+            relativeToChangelogFile: false
+            splitStatements: true
+            stripComments: false

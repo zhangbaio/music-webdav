@@ -6,7 +6,7 @@
         INSERT INTO track(source_config_id, source_path, source_path_md5, source_etag,
             source_last_modified, source_size, mime_type, content_hash,
             title, artist, album, album_artist, track_no, disc_no, `year`, genre,
-            duration_sec, bitrate, sample_rate, channels, has_cover, cover_art_url,
+            duration_sec, bitrate, sample_rate, channels, has_cover, cover_art_url, has_lyric, lyric_path,
             is_deleted, last_scan_task_id)
         VALUES
         <foreach collection="list" item="t" separator=",">
@@ -14,7 +14,7 @@
              #{t.sourceLastModified}, #{t.sourceSize}, #{t.mimeType}, #{t.contentHash},
              #{t.title}, #{t.artist}, #{t.album}, #{t.albumArtist}, #{t.trackNo},
              #{t.discNo}, #{t.year}, #{t.genre}, #{t.durationSec}, #{t.bitrate},
-             #{t.sampleRate}, #{t.channels}, #{t.hasCover}, #{t.coverArtUrl},
+             #{t.sampleRate}, #{t.channels}, #{t.hasCover}, #{t.coverArtUrl}, #{t.hasLyric}, #{t.lyricPath},
              0, #{t.lastScanTaskId})
         </foreach>
         ON DUPLICATE KEY UPDATE
@@ -37,6 +37,8 @@
             channels = VALUES(channels),
             has_cover = VALUES(has_cover),
             cover_art_url = VALUES(cover_art_url),
+            has_lyric = VALUES(has_lyric),
+            lyric_path = VALUES(lyric_path),
             is_deleted = 0,
             last_scan_task_id = VALUES(last_scan_task_id),
             updated_at = NOW()
