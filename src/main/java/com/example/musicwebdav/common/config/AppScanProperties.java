@@ -37,9 +37,24 @@ public class AppScanProperties {
     private int metadataTailBytes = 128;
 
     /**
+     * Parallel worker count for directory file-processing stage.
+     */
+    private int directoryProcessThreadCount = 4;
+
+    /**
+     * Max in-flight directory processing jobs.
+     */
+    private int directoryProcessMaxInFlight = 12;
+
+    /**
      * Whether incremental scan can skip unchanged directories by signature (etag/mtime/child count).
      */
     private boolean incrementalDirectorySkipEnabled = true;
+
+    /**
+     * Whether full scan can skip unchanged directories by signature.
+     */
+    private boolean fullDirectorySkipEnabled = true;
 
     /**
      * Whether incremental scan performs soft-delete detection.

@@ -19,8 +19,11 @@ import com.example.musicwebdav.infrastructure.persistence.mapper.ScanTaskSeenFil
 import com.example.musicwebdav.infrastructure.persistence.mapper.TrackMapper;
 import com.example.musicwebdav.infrastructure.webdav.WebDavClient;
 import com.github.sardine.Sardine;
+import io.micrometer.core.instrument.MeterRegistry;
+import java.util.Date;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -33,8 +36,18 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.function.BooleanSupplier;
 import java.util.regex.Pattern;
+import java.util.concurrent.CompletionService;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorCompletionService;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
@@ -55,6 +68,7 @@ public class PipelineScanService {
     private final DuplicateFilterService duplicateFilterService;
     private final AppSecurityProperties appSecurityProperties;
     private final AppScanProperties appScanProperties;
+    private final MeterRegistry meterRegistry;
 
     public PipelineScanService(WebDavClient webDavClient,
                                 TrackMapper trackMapper,
@@ -66,7 +80,8 @@ public class PipelineScanService {
                                 MetadataFallbackService metadataFallbackService,
                                 DuplicateFilterService duplicateFilterService,
                                 AppSecurityProperties appSecurityProperties,
-                                AppScanProperties appScanProperties) {
+                                AppScanProperties appScanProperties,
+                                ObjectProvider<MeterRegistry> meterRegistryProvider) {
         this.webDavClient = webDavClient;
         this.trackMapper = trackMapper;
         this.scanTaskSeenFileMapper = scanTaskSeenFileMapper;
@@ -78,6 +93,7 @@ public class PipelineScanService {
         this.duplicateFilterService = duplicateFilterService;
         this.appSecurityProperties = appSecurityProperties;
         this.appScanProperties = appScanProperties;
+        this.meterRegistry = meterRegistryProvider.getIfAvailable();
     }
 
     public ScanResult scan(Long taskId, TaskType taskType, WebDavConfigEntity config,
@@ -97,16 +113,32 @@ public class PipelineScanService {
                 taskId, config.getId(), config.getName(), rootUrl);
         log.info("PIPELINE_SCAN_METADATA_MODE taskId={} mode=WEBDAV_INFER_ONLY", taskId);
         boolean isIncremental = TaskType.INCREMENTAL == taskType;
-        final boolean directorySkipEnabled = isIncremental && appScanProperties.isIncrementalDirectorySkipEnabled();
+        final boolean directorySkipEnabled = isIncremental
+                ? appScanProperties.isIncrementalDirectorySkipEnabled()
+                : appScanProperties.isFullDirectorySkipEnabled();
         final boolean deleteDetectionEnabled = !isIncremental || appScanProperties.isIncrementalEnableDeleteDetection();
         final boolean dedupEnabled = !isIncremental || appScanProperties.isIncrementalEnableDedup();
         final boolean hasResumeCheckpoints = resumedCheckpoints != null && !resumedCheckpoints.isEmpty();
         // When directories may be skipped (resume or signature-skip), deletion needs seen-file fallback.
         final boolean useSeenBasedDelete = deleteDetectionEnabled && (hasResumeCheckpoints || directorySkipEnabled);
+        final int directoryProcessThreadCount = Math.max(1, appScanProperties.getDirectoryProcessThreadCount());
+        final int directoryProcessMaxInFlight = Math.max(directoryProcessThreadCount,
+                appScanProperties.getDirectoryProcessMaxInFlight());
+
         log.info("PIPELINE_SCAN_SWITCHES taskId={} taskType={} directorySkip={} deleteDetection={} dedup={} seenDelete={}",
                 taskId, taskType.name(), directorySkipEnabled, deleteDetectionEnabled, dedupEnabled, useSeenBasedDelete);
+        log.info("PIPELINE_SCAN_PARALLEL taskId={} directoryWorkers={} maxInFlight={}",
+                taskId, directoryProcessThreadCount, directoryProcessMaxInFlight);
+        incrementCounter("music.scan.task.started", 1, "task_type", taskType.name());
 
+        String metricStatus = "SUCCESS";
+        long taskStartNanos = System.nanoTime();
         Sardine session = webDavClient.createSession(config.getUsername(), plainPassword);
+        ExecutorService directoryExecutor = Executors.newFixedThreadPool(
+                directoryProcessThreadCount, new NamedThreadFactory("scan-dir-"));
+        CompletionService<DirectoryTaskOutcome> completionService =
+                new ExecutorCompletionService<>(directoryExecutor);
+        int inFlight = 0;
         try {
             Deque<String> dirQueue = new ArrayDeque<>();
             Set<String> visited = new HashSet<>();
@@ -127,16 +159,22 @@ public class PipelineScanService {
                 }
 
                 WebDavDirectoryInfo dirInfo;
+                long listStartNanos = System.nanoTime();
                 try {
                     dirInfo = webDavClient.listDirectory(session, dirUrl, rootUrl);
                 } catch (Exception e) {
+                    recordDuration("music.scan.webdav.list_dir.duration", System.nanoTime() - listStartNanos,
+                            "task_type", taskType.name(), "result", "ERROR");
                     log.warn("PIPELINE_SCAN_DIR_ERROR taskId={} dirUrl={} error={}", taskId, dirUrl, e.getMessage());
                     String failedRelPath = dirUrl.startsWith(rootUrl) ? dirUrl.substring(rootUrl.length()) : dirUrl;
                     String failedPathMd5 = HashUtil.md5Hex(safeRelativePath(failedRelPath));
                     saveCheckpoint(taskId, failedRelPath, failedPathMd5, "FAILED", 0, 0, 1, e.getMessage());
                     result.incrementFailedCount();
+                    incrementCounter("music.scan.dir.failed", 1, "task_type", taskType.name(), "stage", "LIST");
                     continue;
                 }
+                recordDuration("music.scan.webdav.list_dir.duration", System.nanoTime() - listStartNanos,
+                        "task_type", taskType.name(), "result", "OK");
 
                 // Enqueue subdirectories
                 for (String subdir : dirInfo.getSubdirectoryUrls()) {
@@ -153,6 +191,8 @@ public class PipelineScanService {
                         recordSeenFilesForDirectory(taskId, dirInfo, supportedExtensions);
                     }
                     tracker.onDirectorySkipped(dirInfo.getRelativePath());
+                    incrementCounter("music.scan.dir.skipped", 1,
+                            "task_type", taskType.name(), "reason", "RESUME");
                     logIfNeeded(tracker);
                     continue;
                 }
@@ -163,6 +203,8 @@ public class PipelineScanService {
                         recordSeenFilesForDirectory(taskId, dirInfo, supportedExtensions);
                     }
                     tracker.onDirectorySkipped(dirInfo.getRelativePath());
+                    incrementCounter("music.scan.dir.skipped", 1,
+                            "task_type", taskType.name(), "reason", "SIGNATURE");
                     logIfNeeded(tracker);
                     continue;
                 }
@@ -170,22 +212,21 @@ public class PipelineScanService {
                 // Detect cover art
                 String coverUrl = coverArtDetector.detectCoverInDirectory(dirInfo.getFiles());
 
-                // Process files in this directory
-                DirProcessResult dirResult = processDirectoryFiles(
-                        taskId, config, dirInfo, coverUrl, supportedExtensions, lyricExtensions, useSeenBasedDelete);
-                result.addDirResult(dirResult);
+                final WebDavDirectoryInfo finalDirInfo = dirInfo;
+                final String finalDirPathMd5 = dirPathMd5;
+                final String finalCoverUrl = coverUrl;
+                completionService.submit(() -> processDirectoryTask(
+                        taskId, config, finalDirInfo, finalDirPathMd5, finalCoverUrl,
+                        supportedExtensions, lyricExtensions, useSeenBasedDelete, taskType));
+                inFlight++;
 
-                // Update directory signature
-                updateDirectorySignature(config.getId(), dirInfo, dirPathMd5);
-
-                // Save checkpoint
-                saveCheckpoint(taskId, dirInfo.getRelativePath(), dirPathMd5,
-                        dirResult.failed > 0 ? "FAILED" : "COMPLETED",
-                        dirInfo.getFiles().size(), dirResult.processed, dirResult.failed, null);
-
-                tracker.onDirectoryCompleted(dirInfo.getRelativePath(),
-                        dirResult.processed, dirResult.added, dirResult.updated,
-                        dirResult.skipped, dirResult.failed);
+                if (inFlight >= directoryProcessMaxInFlight) {
+                    inFlight -= drainCompletedDirectoryTasks(
+                            completionService, 1, taskId, config.getId(), result, tracker, taskType);
+                } else {
+                    inFlight -= drainCompletedDirectoryTasks(
+                            completionService, 0, taskId, config.getId(), result, tracker, taskType);
+                }
 
                 // Persist progress
                 if (tracker.shouldPersistProgress()) {
@@ -195,6 +236,11 @@ public class PipelineScanService {
                 logIfNeeded(tracker);
             }
 
+            if (inFlight > 0) {
+                inFlight -= drainCompletedDirectoryTasks(
+                        completionService, inFlight, taskId, config.getId(), result, tracker, taskType);
+            }
+
             // Post-scan: soft-delete + dedup
             if (!result.isCanceled()) {
                 if (deleteDetectionEnabled) {
@@ -202,28 +248,141 @@ public class PipelineScanService {
                             ? trackMapper.softDeleteByTaskId(taskId, config.getId())
                             : trackMapper.softDeleteByLastScanTaskId(taskId, config.getId());
                     result.setDeletedCount(deleted);
+                    incrementCounter("music.scan.file.deleted", deleted, "task_type", taskType.name());
                 }
                 if (dedupEnabled) {
                     int deduped = duplicateFilterService.deduplicateTracks(config.getId());
                     result.setDeduplicatedCount(deduped);
+                    incrementCounter("music.scan.file.deduplicated", deduped, "task_type", taskType.name());
                 }
             }
 
             // Final progress persist
             persistProgress(taskId, result, tracker);
-
+            if (result.isCanceled()) {
+                metricStatus = "CANCELED";
+            }
+        } catch (RuntimeException e) {
+            metricStatus = "FAILED";
+            incrementCounter("music.scan.task.failed", 1, "task_type", taskType.name());
+            throw e;
         } finally {
+            directoryExecutor.shutdownNow();
             webDavClient.closeSession(session);
             cleanupSeenFiles(taskId);
+            recordDuration("music.scan.task.duration", System.nanoTime() - taskStartNanos,
+                    "task_type", taskType.name(), "status", metricStatus);
+            incrementCounter("music.scan.task.finished", 1,
+                    "task_type", taskType.name(), "status", metricStatus);
         }
 
+        long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - taskStartNanos);
         log.info("PIPELINE_SCAN_FINISH taskId={} totalFiles={} audioFiles={} added={} updated={} deleted={} "
-                + "deduped={} failed={} dirsTotal={} dirsSkipped={}",
+                + "deduped={} failed={} dirsTotal={} dirsSkipped={} elapsedMs={} elapsed={}",
                 taskId, result.getTotalFiles(), result.getAudioFiles(), result.getAddedCount(),
                 result.getUpdatedCount(), result.getDeletedCount(), result.getDeduplicatedCount(),
                 result.getFailedCount(), tracker.getTotalDirectoriesDiscovered(),
-                tracker.getSkippedDirectories());
+                tracker.getSkippedDirectories(), elapsedMs, formatElapsed(elapsedMs));
         return result;
+    }
+
+    private DirectoryTaskOutcome processDirectoryTask(Long taskId, WebDavConfigEntity config,
+                                                      WebDavDirectoryInfo dirInfo, String dirPathMd5,
+                                                      String coverUrl, Set<String> supportedExtensions,
+                                                      Set<String> lyricExtensions, boolean collectSeenForDelete,
+                                                      TaskType taskType) {
+        long processStartNanos = System.nanoTime();
+        try {
+            DirProcessResult dirResult = processDirectoryFiles(
+                    taskId, config, dirInfo, coverUrl, supportedExtensions, lyricExtensions, collectSeenForDelete);
+            recordDuration("music.scan.dir.process.duration", System.nanoTime() - processStartNanos,
+                    "task_type", taskType.name(), "result", "OK");
+            return DirectoryTaskOutcome.success(dirInfo, dirPathMd5, dirResult);
+        } catch (Exception e) {
+            recordDuration("music.scan.dir.process.duration", System.nanoTime() - processStartNanos,
+                    "task_type", taskType.name(), "result", "ERROR");
+            return DirectoryTaskOutcome.failed(dirInfo, dirPathMd5, e);
+        }
+    }
+
+    private int drainCompletedDirectoryTasks(CompletionService<DirectoryTaskOutcome> completionService,
+                                             int requiredCount, Long taskId, Long configId,
+                                             ScanResult result, ScanProgressTracker tracker,
+                                             TaskType taskType) {
+        int drained = 0;
+        while (requiredCount <= 0 || drained < requiredCount) {
+            Future<DirectoryTaskOutcome> future = null;
+            try {
+                if (requiredCount > 0 && drained < requiredCount) {
+                    future = completionService.take();
+                } else {
+                    future = completionService.poll();
+                    if (future == null) {
+                        break;
+                    }
+                }
+                DirectoryTaskOutcome outcome = future.get();
+                applyDirectoryTaskOutcome(outcome, taskId, configId, result, tracker, taskType);
+                drained++;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("目录处理任务被中断", e);
+            } catch (ExecutionException e) {
+                throw new IllegalStateException("目录处理任务执行失败", e.getCause());
+            }
+        }
+        return drained;
+    }
+
+    private void applyDirectoryTaskOutcome(DirectoryTaskOutcome outcome,
+                                           Long taskId, Long configId,
+                                           ScanResult result, ScanProgressTracker tracker,
+                                           TaskType taskType) {
+        if (outcome.error != null) {
+            String errorMessage = limitLength(outcome.error.getMessage(), 1000);
+            saveCheckpoint(taskId, outcome.dirRelativePath, outcome.dirPathMd5,
+                    "FAILED", outcome.fileCount, 0, 1, errorMessage);
+            result.incrementFailedCount();
+            tracker.onDirectoryCompleted(outcome.dirRelativePath, 0, 0, 0, 0, 1);
+            incrementCounter("music.scan.dir.failed", 1, "task_type", taskType.name(), "stage", "PROCESS");
+            return;
+        }
+
+        DirProcessResult dirResult = outcome.dirResult;
+        result.addDirResult(dirResult);
+        int checkpointFailedCount = dirResult.failed;
+        String checkpointStatus = dirResult.failed > 0 ? "FAILED" : "COMPLETED";
+        String checkpointError = null;
+
+        try {
+            updateDirectorySignature(configId, outcome.dirInfo, outcome.dirPathMd5);
+        } catch (Exception e) {
+            checkpointStatus = "FAILED";
+            checkpointFailedCount += 1;
+            checkpointError = limitLength("目录签名更新失败: " + e.getMessage(), 1000);
+            result.incrementFailedCount();
+            incrementCounter("music.scan.dir.failed", 1, "task_type", taskType.name(), "stage", "SIGNATURE");
+            log.warn("Update directory signature failed, taskId={}, dir={}",
+                    taskId, outcome.dirRelativePath, e);
+        }
+
+        try {
+            saveCheckpoint(taskId, outcome.dirRelativePath, outcome.dirPathMd5,
+                    checkpointStatus, outcome.fileCount, dirResult.processed, checkpointFailedCount, checkpointError);
+        } catch (Exception e) {
+            incrementCounter("music.scan.dir.failed", 1, "task_type", taskType.name(), "stage", "CHECKPOINT");
+            log.warn("Save checkpoint failed, taskId={}, dir={}", taskId, outcome.dirRelativePath, e);
+        }
+
+        tracker.onDirectoryCompleted(outcome.dirRelativePath,
+                dirResult.processed, dirResult.added, dirResult.updated,
+                dirResult.skipped, checkpointFailedCount);
+        incrementCounter("music.scan.dir.processed", 1, "task_type", taskType.name());
+        incrementCounter("music.scan.file.audio", dirResult.audioFiles, "task_type", taskType.name());
+        incrementCounter("music.scan.file.added", dirResult.added, "task_type", taskType.name());
+        incrementCounter("music.scan.file.updated", dirResult.updated, "task_type", taskType.name());
+        incrementCounter("music.scan.file.skipped", dirResult.skipped, "task_type", taskType.name());
+        incrementCounter("music.scan.file.failed", checkpointFailedCount, "task_type", taskType.name());
     }
 
     private DirProcessResult processDirectoryFiles(Long taskId, WebDavConfigEntity config,
@@ -431,8 +590,9 @@ public class PipelineScanService {
         }
         // Compare lastModified
         if (existing.getDirLastModified() != null && dirInfo.getLastModified() != null) {
-            LocalDateTime infoLm = LocalDateTime.ofInstant(dirInfo.getLastModified().toInstant(), ZoneId.systemDefault());
-            if (!existing.getDirLastModified().equals(infoLm)) {
+            LocalDateTime infoLm = toSecondPrecisionLocalDateTime(dirInfo.getLastModified());
+            LocalDateTime existingLm = existing.getDirLastModified().truncatedTo(ChronoUnit.SECONDS);
+            if (!existingLm.equals(infoLm)) {
                 return false;
             }
         }
@@ -450,7 +610,7 @@ public class PipelineScanService {
         entity.setDirPathMd5(dirPathMd5);
         entity.setDirEtag(dirInfo.getEtag());
         if (dirInfo.getLastModified() != null) {
-            entity.setDirLastModified(LocalDateTime.ofInstant(dirInfo.getLastModified().toInstant(), ZoneId.systemDefault()));
+            entity.setDirLastModified(toSecondPrecisionLocalDateTime(dirInfo.getLastModified()));
         }
         entity.setChildCount(dirInfo.getChildCount());
         directorySignatureMapper.upsert(entity);
@@ -506,7 +666,7 @@ public class PipelineScanService {
         entity.setSourcePathMd5(pathMd5);
         entity.setSourceEtag(file.getEtag());
         if (file.getLastModified() != null) {
-            entity.setSourceLastModified(LocalDateTime.ofInstant(file.getLastModified().toInstant(), ZoneId.systemDefault()));
+            entity.setSourceLastModified(toSecondPrecisionLocalDateTime(file.getLastModified()));
         }
         entity.setSourceSize(file.getSize());
         entity.setMimeType(normalizeMimeType(file.getMimeType()));
@@ -543,8 +703,9 @@ public class PipelineScanService {
         }
         if (existing.getSourceLastModified() != null && file.getLastModified() != null
                 && existing.getSourceSize() != null && file.getSize() != null) {
-            LocalDateTime lastModified = LocalDateTime.ofInstant(file.getLastModified().toInstant(), ZoneId.systemDefault());
-            return existing.getSourceLastModified().equals(lastModified)
+            LocalDateTime lastModified = toSecondPrecisionLocalDateTime(file.getLastModified());
+            LocalDateTime existingLastModified = existing.getSourceLastModified().truncatedTo(ChronoUnit.SECONDS);
+            return existingLastModified.equals(lastModified)
                     && existing.getSourceSize().equals(file.getSize());
         }
         return false;
@@ -702,6 +863,14 @@ public class PipelineScanService {
         return normalized;
     }
 
+    private LocalDateTime toSecondPrecisionLocalDateTime(Date date) {
+        if (date == null) {
+            return null;
+        }
+        return LocalDateTime.ofInstant(date.toInstant(), ZoneId.systemDefault())
+                .truncatedTo(ChronoUnit.SECONDS);
+    }
+
     private String limitLength(String value, int maxLength) {
         if (!StringUtils.hasText(value)) {
             return null;
@@ -709,7 +878,91 @@ public class PipelineScanService {
         return value.length() <= maxLength ? value : value.substring(0, maxLength);
     }
 
+    private void incrementCounter(String name, double value, String... tags) {
+        if (meterRegistry == null || value <= 0) {
+            return;
+        }
+        try {
+            meterRegistry.counter(name, tags).increment(value);
+        } catch (Exception e) {
+            log.debug("Metric counter update failed, name={}", name, e);
+        }
+    }
+
+    private void recordDuration(String name, long nanos, String... tags) {
+        if (meterRegistry == null || nanos <= 0) {
+            return;
+        }
+        try {
+            meterRegistry.timer(name, tags).record(nanos, TimeUnit.NANOSECONDS);
+        } catch (Exception e) {
+            log.debug("Metric timer update failed, name={}", name, e);
+        }
+    }
+
+    private String formatElapsed(long elapsedMs) {
+        if (elapsedMs < 1000) {
+            return elapsedMs + "ms";
+        }
+        long seconds = elapsedMs / 1000;
+        long minutes = seconds / 60;
+        long remainSeconds = seconds % 60;
+        if (minutes <= 0) {
+            return seconds + "s";
+        }
+        long hours = minutes / 60;
+        long remainMinutes = minutes % 60;
+        if (hours <= 0) {
+            return minutes + "m" + remainSeconds + "s";
+        }
+        return hours + "h" + remainMinutes + "m" + remainSeconds + "s";
+    }
+
     // --- Inner classes ---
+
+    private static class DirectoryTaskOutcome {
+        private final WebDavDirectoryInfo dirInfo;
+        private final String dirRelativePath;
+        private final String dirPathMd5;
+        private final int fileCount;
+        private final DirProcessResult dirResult;
+        private final Exception error;
+
+        private DirectoryTaskOutcome(WebDavDirectoryInfo dirInfo, String dirPathMd5,
+                                     DirProcessResult dirResult, Exception error) {
+            this.dirInfo = dirInfo;
+            this.dirRelativePath = dirInfo == null ? "" : dirInfo.getRelativePath();
+            this.dirPathMd5 = dirPathMd5;
+            this.fileCount = dirInfo == null || dirInfo.getFiles() == null ? 0 : dirInfo.getFiles().size();
+            this.dirResult = dirResult;
+            this.error = error;
+        }
+
+        private static DirectoryTaskOutcome success(WebDavDirectoryInfo dirInfo, String dirPathMd5,
+                                                    DirProcessResult dirResult) {
+            return new DirectoryTaskOutcome(dirInfo, dirPathMd5, dirResult, null);
+        }
+
+        private static DirectoryTaskOutcome failed(WebDavDirectoryInfo dirInfo, String dirPathMd5, Exception error) {
+            return new DirectoryTaskOutcome(dirInfo, dirPathMd5, null, error);
+        }
+    }
+
+    private static class NamedThreadFactory implements ThreadFactory {
+        private final AtomicInteger index = new AtomicInteger(1);
+        private final String prefix;
+
+        private NamedThreadFactory(String prefix) {
+            this.prefix = prefix;
+        }
+
+        @Override
+        public Thread newThread(Runnable r) {
+            Thread t = new Thread(r, prefix + index.getAndIncrement());
+            t.setDaemon(true);
+            return t;
+        }
+    }
 
     private static class AudioCandidate {
         private final WebDavFileObject file;

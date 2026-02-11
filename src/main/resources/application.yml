@@ -53,7 +53,10 @@ app:
     progress-persist-interval-sec: 30
     metadata-head-bytes: 131072
     metadata-tail-bytes: 128
+    directory-process-thread-count: 4
+    directory-process-max-in-flight: 12
     incremental-directory-skip-enabled: true
+    full-directory-skip-enabled: true
     incremental-enable-delete-detection: false
     incremental-enable-dedup: false
   playlist:
