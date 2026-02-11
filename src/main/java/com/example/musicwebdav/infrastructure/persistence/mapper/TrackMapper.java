@@ -92,6 +92,18 @@ public interface TrackMapper {
                                      @Param("configId") Long configId,
                                      @Param("sourcePathMd5List") List<String> sourcePathMd5List);
 
+    @Update("UPDATE track SET last_scan_task_id = #{taskId} "
+            + "WHERE is_deleted = 0 AND source_config_id = #{configId}")
+    int touchLastScanTaskByConfig(@Param("taskId") Long taskId,
+                                  @Param("configId") Long configId);
+
+    @Update("UPDATE track SET last_scan_task_id = #{taskId} "
+            + "WHERE is_deleted = 0 AND source_config_id = #{configId} "
+            + "AND source_path LIKE #{likePattern} ESCAPE '\\\\'")
+    int touchLastScanTaskByDirectoryPrefix(@Param("taskId") Long taskId,
+                                           @Param("configId") Long configId,
+                                           @Param("likePattern") String likePattern);
+
     @Select("<script>"
             + "SELECT id, title, artist, album, source_path, duration_sec, has_lyric "
             + "FROM track "

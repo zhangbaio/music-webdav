@@ -47,6 +47,16 @@ public class AppScanProperties {
     private int directoryProcessMaxInFlight = 12;
 
     /**
+     * Parallel worker count for directory listing stage.
+     */
+    private int directoryListThreadCount = 4;
+
+    /**
+     * Max in-flight directory listing jobs.
+     */
+    private int directoryListMaxInFlight = 24;
+
+    /**
      * Whether incremental scan can skip unchanged directories by signature (etag/mtime/child count).
      */
     private boolean incrementalDirectorySkipEnabled = true;
@@ -55,6 +65,37 @@ public class AppScanProperties {
      * Whether full scan can skip unchanged directories by signature.
      */
     private boolean fullDirectorySkipEnabled = true;
+
+    /**
+     * Whether full scan performs soft-delete detection.
+     */
+    private boolean fullEnableDeleteDetection = true;
+
+    /**
+     * Whether full scan runs deduplication.
+     */
+    private boolean fullEnableDedup = true;
+
+    /**
+     * Minimum changed rows (added + updated + deleted) to trigger dedup in FULL scan.
+     */
+    private int dedupMinChangedCount = 200;
+
+    /**
+     * Minimum changed ratio to trigger dedup in FULL scan.
+     */
+    private double dedupMinChangedRatio = 0.01D;
+
+    /**
+     * Always run dedup for small libraries when there is any change.
+     */
+    private int dedupAlwaysForSmallLibraryMaxFiles = 5000;
+
+    /**
+     * Whether full scan uses seen-file fallback for delete detection when directory skip is enabled.
+     * Disable this to reduce DB write amplification, then rely on last_scan_task_id + directory prefix touch.
+     */
+    private boolean fullSeenDeleteFallbackEnabled = false;
 
     /**
      * Whether incremental scan performs soft-delete detection.

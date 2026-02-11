@@ -45,6 +45,8 @@ import java.util.concurrent.Future;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.LongAdder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
@@ -116,80 +118,110 @@ public class PipelineScanService {
         final boolean directorySkipEnabled = isIncremental
                 ? appScanProperties.isIncrementalDirectorySkipEnabled()
                 : appScanProperties.isFullDirectorySkipEnabled();
-        final boolean deleteDetectionEnabled = !isIncremental || appScanProperties.isIncrementalEnableDeleteDetection();
-        final boolean dedupEnabled = !isIncremental || appScanProperties.isIncrementalEnableDedup();
+        final boolean deleteDetectionEnabled = isIncremental
+                ? appScanProperties.isIncrementalEnableDeleteDetection()
+                : appScanProperties.isFullEnableDeleteDetection();
+        final boolean dedupEnabled = isIncremental
+                ? appScanProperties.isIncrementalEnableDedup()
+                : appScanProperties.isFullEnableDedup();
         final boolean hasResumeCheckpoints = resumedCheckpoints != null && !resumedCheckpoints.isEmpty();
-        // When directories may be skipped (resume or signature-skip), deletion needs seen-file fallback.
-        final boolean useSeenBasedDelete = deleteDetectionEnabled && (hasResumeCheckpoints || directorySkipEnabled);
+        // Resume checkpoints keep strict seen-file fallback. Full scan can switch to prefix-touch mode to reduce writes.
+        final boolean useSeenBasedDelete = deleteDetectionEnabled
+                && (hasResumeCheckpoints || (isIncremental
+                ? directorySkipEnabled
+                : appScanProperties.isFullSeenDeleteFallbackEnabled()));
+        final int directoryListThreadCount = Math.max(1, appScanProperties.getDirectoryListThreadCount());
+        final int directoryListMaxInFlight = Math.max(directoryListThreadCount,
+                appScanProperties.getDirectoryListMaxInFlight());
         final int directoryProcessThreadCount = Math.max(1, appScanProperties.getDirectoryProcessThreadCount());
         final int directoryProcessMaxInFlight = Math.max(directoryProcessThreadCount,
                 appScanProperties.getDirectoryProcessMaxInFlight());
+        final ScanTelemetry telemetry = new ScanTelemetry(taskId, config.getId(), taskType.name());
 
         log.info("PIPELINE_SCAN_SWITCHES taskId={} taskType={} directorySkip={} deleteDetection={} dedup={} seenDelete={}",
                 taskId, taskType.name(), directorySkipEnabled, deleteDetectionEnabled, dedupEnabled, useSeenBasedDelete);
-        log.info("PIPELINE_SCAN_PARALLEL taskId={} directoryWorkers={} maxInFlight={}",
-                taskId, directoryProcessThreadCount, directoryProcessMaxInFlight);
+        log.info("PIPELINE_SCAN_PARALLEL taskId={} listWorkers={} listMaxInFlight={} processWorkers={} processMaxInFlight={}",
+                taskId, directoryListThreadCount, directoryListMaxInFlight,
+                directoryProcessThreadCount, directoryProcessMaxInFlight);
         incrementCounter("music.scan.task.started", 1, "task_type", taskType.name());
 
         String metricStatus = "SUCCESS";
         long taskStartNanos = System.nanoTime();
-        Sardine session = webDavClient.createSession(config.getUsername(), plainPassword);
+        final ThreadLocal<Sardine> listSessionHolder = new ThreadLocal<>();
+        final ConcurrentLinkedQueue<Sardine> listSessions = new ConcurrentLinkedQueue<>();
+        ExecutorService listExecutor = Executors.newFixedThreadPool(
+                directoryListThreadCount, new NamedThreadFactory("scan-list-"));
         ExecutorService directoryExecutor = Executors.newFixedThreadPool(
                 directoryProcessThreadCount, new NamedThreadFactory("scan-dir-"));
-        CompletionService<DirectoryTaskOutcome> completionService =
+        CompletionService<DirectoryListOutcome> listCompletionService =
+                new ExecutorCompletionService<>(listExecutor);
+        CompletionService<DirectoryTaskOutcome> processCompletionService =
                 new ExecutorCompletionService<>(directoryExecutor);
-        int inFlight = 0;
+        int listInFlight = 0;
+        int processInFlight = 0;
         try {
             Deque<String> dirQueue = new ArrayDeque<>();
-            Set<String> visited = new HashSet<>();
+            Set<String> scheduled = new HashSet<>();
             dirQueue.push(rootUrl);
+            scheduled.add(normalizeUrl(rootUrl));
             tracker.addDiscoveredDirectories(1);
 
-            while (!dirQueue.isEmpty()) {
+            while (!dirQueue.isEmpty() || listInFlight > 0) {
                 if (cancelSignal != null && cancelSignal.getAsBoolean()) {
                     result.setCanceled(true);
                     log.info("PIPELINE_SCAN_CANCELED taskId={}", taskId);
                     break;
                 }
 
-                String dirUrl = dirQueue.pop();
-                String dirKey = normalizeUrl(dirUrl);
-                if (!visited.add(dirKey)) {
+                while (!dirQueue.isEmpty() && listInFlight < directoryListMaxInFlight) {
+                    final String dirUrl = dirQueue.pop();
+                    listCompletionService.submit(() -> listDirectoryTask(
+                            taskId, config, plainPassword, rootUrl, dirUrl, taskType,
+                            listSessionHolder, listSessions, telemetry));
+                    listInFlight++;
+                }
+
+                if (listInFlight <= 0) {
                     continue;
                 }
 
-                WebDavDirectoryInfo dirInfo;
-                long listStartNanos = System.nanoTime();
-                try {
-                    dirInfo = webDavClient.listDirectory(session, dirUrl, rootUrl);
-                } catch (Exception e) {
-                    recordDuration("music.scan.webdav.list_dir.duration", System.nanoTime() - listStartNanos,
-                            "task_type", taskType.name(), "result", "ERROR");
-                    log.warn("PIPELINE_SCAN_DIR_ERROR taskId={} dirUrl={} error={}", taskId, dirUrl, e.getMessage());
-                    String failedRelPath = dirUrl.startsWith(rootUrl) ? dirUrl.substring(rootUrl.length()) : dirUrl;
+                DirectoryListOutcome listOutcome = takeDirectoryListOutcome(listCompletionService);
+                listInFlight--;
+
+                if (listOutcome.error != null) {
+                    String failedRelPath = listOutcome.dirUrl.startsWith(rootUrl)
+                            ? listOutcome.dirUrl.substring(rootUrl.length())
+                            : listOutcome.dirUrl;
                     String failedPathMd5 = HashUtil.md5Hex(safeRelativePath(failedRelPath));
-                    saveCheckpoint(taskId, failedRelPath, failedPathMd5, "FAILED", 0, 0, 1, e.getMessage());
+                    saveCheckpoint(taskId, failedRelPath, failedPathMd5, "FAILED", 0, 0, 1,
+                            limitLength(listOutcome.error.getMessage(), 1000));
                     result.incrementFailedCount();
                     incrementCounter("music.scan.dir.failed", 1, "task_type", taskType.name(), "stage", "LIST");
                     continue;
                 }
-                recordDuration("music.scan.webdav.list_dir.duration", System.nanoTime() - listStartNanos,
-                        "task_type", taskType.name(), "result", "OK");
+
+                WebDavDirectoryInfo dirInfo = listOutcome.dirInfo;
 
                 // Enqueue subdirectories
+                int discovered = 0;
                 for (String subdir : dirInfo.getSubdirectoryUrls()) {
-                    dirQueue.push(subdir);
+                    String subdirKey = normalizeUrl(subdir);
+                    if (scheduled.add(subdirKey)) {
+                        dirQueue.push(subdir);
+                        discovered++;
+                    }
                 }
-                tracker.addDiscoveredDirectories(dirInfo.getSubdirectoryUrls().size());
+                if (discovered > 0) {
+                    tracker.addDiscoveredDirectories(discovered);
+                }
                 tracker.onDirectoryDiscovered(dirInfo.getRelativePath(), dirInfo.getFiles().size());
 
                 String dirPathMd5 = HashUtil.md5Hex(safeRelativePath(dirInfo.getRelativePath()));
 
                 // Check resume checkpoint
                 if (resumedCheckpoints != null && resumedCheckpoints.contains(dirPathMd5)) {
-                    if (useSeenBasedDelete) {
-                        recordSeenFilesForDirectory(taskId, dirInfo, supportedExtensions);
-                    }
+                    markSkippedDirectory(taskId, config.getId(), dirInfo, supportedExtensions,
+                            deleteDetectionEnabled, useSeenBasedDelete, telemetry, taskType);
                     tracker.onDirectorySkipped(dirInfo.getRelativePath());
                     incrementCounter("music.scan.dir.skipped", 1,
                             "task_type", taskType.name(), "reason", "RESUME");
@@ -197,11 +229,10 @@ public class PipelineScanService {
                     continue;
                 }
 
-                // Check directory signature (incremental)
+                // Check directory signature
                 if (directorySkipEnabled && isDirectoryUnchanged(config.getId(), dirInfo, dirPathMd5)) {
-                    if (useSeenBasedDelete) {
-                        recordSeenFilesForDirectory(taskId, dirInfo, supportedExtensions);
-                    }
+                    markSkippedDirectory(taskId, config.getId(), dirInfo, supportedExtensions,
+                            deleteDetectionEnabled, useSeenBasedDelete, telemetry, taskType);
                     tracker.onDirectorySkipped(dirInfo.getRelativePath());
                     incrementCounter("music.scan.dir.skipped", 1,
                             "task_type", taskType.name(), "reason", "SIGNATURE");
@@ -215,17 +246,17 @@ public class PipelineScanService {
                 final WebDavDirectoryInfo finalDirInfo = dirInfo;
                 final String finalDirPathMd5 = dirPathMd5;
                 final String finalCoverUrl = coverUrl;
-                completionService.submit(() -> processDirectoryTask(
+                processCompletionService.submit(() -> processDirectoryTask(
                         taskId, config, finalDirInfo, finalDirPathMd5, finalCoverUrl,
-                        supportedExtensions, lyricExtensions, useSeenBasedDelete, taskType));
-                inFlight++;
+                        supportedExtensions, lyricExtensions, useSeenBasedDelete, taskType, telemetry));
+                processInFlight++;
 
-                if (inFlight >= directoryProcessMaxInFlight) {
-                    inFlight -= drainCompletedDirectoryTasks(
-                            completionService, 1, taskId, config.getId(), result, tracker, taskType);
+                if (processInFlight >= directoryProcessMaxInFlight) {
+                    processInFlight -= drainCompletedDirectoryTasks(
+                            processCompletionService, 1, taskId, config.getId(), result, tracker, taskType, telemetry);
                 } else {
-                    inFlight -= drainCompletedDirectoryTasks(
-                            completionService, 0, taskId, config.getId(), result, tracker, taskType);
+                    processInFlight -= drainCompletedDirectoryTasks(
+                            processCompletionService, 0, taskId, config.getId(), result, tracker, taskType, telemetry);
                 }
 
                 // Persist progress
@@ -236,9 +267,26 @@ public class PipelineScanService {
                 logIfNeeded(tracker);
             }
 
-            if (inFlight > 0) {
-                inFlight -= drainCompletedDirectoryTasks(
-                        completionService, inFlight, taskId, config.getId(), result, tracker, taskType);
+            if (!result.isCanceled() && listInFlight > 0) {
+                while (listInFlight > 0) {
+                    DirectoryListOutcome listOutcome = takeDirectoryListOutcome(listCompletionService);
+                    listInFlight--;
+                    if (listOutcome.error != null) {
+                        String failedRelPath = listOutcome.dirUrl.startsWith(rootUrl)
+                                ? listOutcome.dirUrl.substring(rootUrl.length())
+                                : listOutcome.dirUrl;
+                        String failedPathMd5 = HashUtil.md5Hex(safeRelativePath(failedRelPath));
+                        saveCheckpoint(taskId, failedRelPath, failedPathMd5, "FAILED", 0, 0, 1,
+                                limitLength(listOutcome.error.getMessage(), 1000));
+                        result.incrementFailedCount();
+                        incrementCounter("music.scan.dir.failed", 1, "task_type", taskType.name(), "stage", "LIST");
+                    }
+                }
+            }
+
+            if (!result.isCanceled() && processInFlight > 0) {
+                processInFlight -= drainCompletedDirectoryTasks(
+                        processCompletionService, processInFlight, taskId, config.getId(), result, tracker, taskType, telemetry);
             }
 
             // Post-scan: soft-delete + dedup
@@ -250,8 +298,13 @@ public class PipelineScanService {
                     result.setDeletedCount(deleted);
                     incrementCounter("music.scan.file.deleted", deleted, "task_type", taskType.name());
                 }
-                if (dedupEnabled) {
+                if (shouldRunDedup(taskType, dedupEnabled, result)) {
+                    long dedupStartNanos = System.nanoTime();
                     int deduped = duplicateFilterService.deduplicateTracks(config.getId());
+                    long dedupElapsed = System.nanoTime() - dedupStartNanos;
+                    telemetry.recordDedup(dedupElapsed, deduped);
+                    recordDuration("music.scan.dedup.duration", dedupElapsed, "task_type", taskType.name());
+                    incrementCounter("music.scan.dedup.affected", deduped, "task_type", taskType.name());
                     result.setDeduplicatedCount(deduped);
                     incrementCounter("music.scan.file.deduplicated", deduped, "task_type", taskType.name());
                 }
@@ -267,8 +320,11 @@ public class PipelineScanService {
             incrementCounter("music.scan.task.failed", 1, "task_type", taskType.name());
             throw e;
         } finally {
+            listExecutor.shutdownNow();
             directoryExecutor.shutdownNow();
-            webDavClient.closeSession(session);
+            for (Sardine listSession : listSessions) {
+                webDavClient.closeSession(listSession);
+            }
             cleanupSeenFiles(taskId);
             recordDuration("music.scan.task.duration", System.nanoTime() - taskStartNanos,
                     "task_type", taskType.name(), "status", metricStatus);
@@ -277,6 +333,7 @@ public class PipelineScanService {
         }
 
         long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - taskStartNanos);
+        telemetry.logSummary(elapsedMs, result);
         log.info("PIPELINE_SCAN_FINISH taskId={} totalFiles={} audioFiles={} added={} updated={} deleted={} "
                 + "deduped={} failed={} dirsTotal={} dirsSkipped={} elapsedMs={} elapsed={}",
                 taskId, result.getTotalFiles(), result.getAudioFiles(), result.getAddedCount(),
@@ -286,20 +343,126 @@ public class PipelineScanService {
         return result;
     }
 
+    private DirectoryListOutcome listDirectoryTask(Long taskId,
+                                                   WebDavConfigEntity config,
+                                                   String plainPassword,
+                                                   String rootUrl,
+                                                   String dirUrl,
+                                                   TaskType taskType,
+                                                   ThreadLocal<Sardine> listSessionHolder,
+                                                   ConcurrentLinkedQueue<Sardine> listSessions,
+                                                   ScanTelemetry telemetry) {
+        Sardine session = listSessionHolder.get();
+        if (session == null) {
+            session = webDavClient.createSession(config.getUsername(), plainPassword);
+            listSessionHolder.set(session);
+            listSessions.add(session);
+        }
+
+        long listStartNanos = System.nanoTime();
+        try {
+            WebDavDirectoryInfo dirInfo = webDavClient.listDirectory(session, dirUrl, rootUrl);
+            telemetry.recordListSuccess(System.nanoTime() - listStartNanos);
+            recordDuration("music.scan.webdav.list_dir.duration", System.nanoTime() - listStartNanos,
+                    "task_type", taskType.name(), "result", "OK");
+            return DirectoryListOutcome.success(dirUrl, dirInfo);
+        } catch (Exception e) {
+            telemetry.recordListFailed(System.nanoTime() - listStartNanos);
+            recordDuration("music.scan.webdav.list_dir.duration", System.nanoTime() - listStartNanos,
+                    "task_type", taskType.name(), "result", "ERROR");
+            log.warn("PIPELINE_SCAN_DIR_ERROR taskId={} dirUrl={} error={}", taskId, dirUrl, e.getMessage());
+            return DirectoryListOutcome.failed(dirUrl, e);
+        }
+    }
+
+    private DirectoryListOutcome takeDirectoryListOutcome(
+            CompletionService<DirectoryListOutcome> listCompletionService) {
+        try {
+            Future<DirectoryListOutcome> future = listCompletionService.take();
+            return future.get();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("目录枚举任务被中断", e);
+        } catch (ExecutionException e) {
+            throw new IllegalStateException("目录枚举任务执行失败", e.getCause());
+        }
+    }
+
+    private void markSkippedDirectory(Long taskId, Long configId, WebDavDirectoryInfo dirInfo,
+                                      Set<String> supportedExtensions,
+                                      boolean deleteDetectionEnabled,
+                                      boolean useSeenBasedDelete,
+                                      ScanTelemetry telemetry,
+                                      TaskType taskType) {
+        if (!deleteDetectionEnabled) {
+            return;
+        }
+        if (useSeenBasedDelete) {
+            recordSeenFilesForDirectory(taskId, dirInfo, supportedExtensions, telemetry, taskType);
+            return;
+        }
+        touchLastScanTaskForDirectory(taskId, configId,
+                dirInfo == null ? null : dirInfo.getRelativePath(), telemetry, taskType);
+    }
+
+    private void touchLastScanTaskForDirectory(Long taskId, Long configId, String dirRelativePath,
+                                               ScanTelemetry telemetry, TaskType taskType) {
+        String normalized = normalizeRelativePath(dirRelativePath);
+        long startNanos = System.nanoTime();
+        try {
+            if (!StringUtils.hasText(normalized)) {
+                trackMapper.touchLastScanTaskByConfig(taskId, configId);
+                long elapsed = System.nanoTime() - startNanos;
+                telemetry.recordTouchByPrefix(elapsed);
+                recordDuration("music.scan.db.touch_by_prefix.duration", elapsed,
+                        "task_type", taskType.name(), "result", "OK");
+                return;
+            }
+            String escaped = escapeLikePattern(normalized);
+            String likePattern = (escaped.endsWith("/") ? escaped : escaped + "/") + "%";
+            trackMapper.touchLastScanTaskByDirectoryPrefix(taskId, configId, likePattern);
+            long elapsed = System.nanoTime() - startNanos;
+            telemetry.recordTouchByPrefix(elapsed);
+            recordDuration("music.scan.db.touch_by_prefix.duration", elapsed,
+                    "task_type", taskType.name(), "result", "OK");
+        } catch (Exception e) {
+            telemetry.recordTouchByPrefixFailed();
+            recordDuration("music.scan.db.touch_by_prefix.duration", System.nanoTime() - startNanos,
+                    "task_type", taskType.name(), "result", "ERROR");
+            log.warn("Touch last_scan_task_id by directory failed, taskId={}, configId={}, dir={}",
+                    taskId, configId, dirRelativePath, e);
+        }
+    }
+
+    private String escapeLikePattern(String value) {
+        if (value == null) {
+            return "";
+        }
+        return value.replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_");
+    }
+
     private DirectoryTaskOutcome processDirectoryTask(Long taskId, WebDavConfigEntity config,
                                                       WebDavDirectoryInfo dirInfo, String dirPathMd5,
                                                       String coverUrl, Set<String> supportedExtensions,
                                                       Set<String> lyricExtensions, boolean collectSeenForDelete,
-                                                      TaskType taskType) {
+                                                      TaskType taskType,
+                                                      ScanTelemetry telemetry) {
         long processStartNanos = System.nanoTime();
         try {
             DirProcessResult dirResult = processDirectoryFiles(
-                    taskId, config, dirInfo, coverUrl, supportedExtensions, lyricExtensions, collectSeenForDelete);
-            recordDuration("music.scan.dir.process.duration", System.nanoTime() - processStartNanos,
+                    taskId, config, dirInfo, coverUrl, supportedExtensions, lyricExtensions, collectSeenForDelete,
+                    telemetry, taskType);
+            long elapsed = System.nanoTime() - processStartNanos;
+            telemetry.recordProcessSuccess(elapsed);
+            recordDuration("music.scan.dir.process.duration", elapsed,
                     "task_type", taskType.name(), "result", "OK");
             return DirectoryTaskOutcome.success(dirInfo, dirPathMd5, dirResult);
         } catch (Exception e) {
-            recordDuration("music.scan.dir.process.duration", System.nanoTime() - processStartNanos,
+            long elapsed = System.nanoTime() - processStartNanos;
+            telemetry.recordProcessFailed(elapsed);
+            recordDuration("music.scan.dir.process.duration", elapsed,
                     "task_type", taskType.name(), "result", "ERROR");
             return DirectoryTaskOutcome.failed(dirInfo, dirPathMd5, e);
         }
@@ -308,7 +471,8 @@ public class PipelineScanService {
     private int drainCompletedDirectoryTasks(CompletionService<DirectoryTaskOutcome> completionService,
                                              int requiredCount, Long taskId, Long configId,
                                              ScanResult result, ScanProgressTracker tracker,
-                                             TaskType taskType) {
+                                             TaskType taskType,
+                                             ScanTelemetry telemetry) {
         int drained = 0;
         while (requiredCount <= 0 || drained < requiredCount) {
             Future<DirectoryTaskOutcome> future = null;
@@ -322,7 +486,7 @@ public class PipelineScanService {
                     }
                 }
                 DirectoryTaskOutcome outcome = future.get();
-                applyDirectoryTaskOutcome(outcome, taskId, configId, result, tracker, taskType);
+                applyDirectoryTaskOutcome(outcome, taskId, configId, result, tracker, taskType, telemetry);
                 drained++;
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -337,7 +501,8 @@ public class PipelineScanService {
     private void applyDirectoryTaskOutcome(DirectoryTaskOutcome outcome,
                                            Long taskId, Long configId,
                                            ScanResult result, ScanProgressTracker tracker,
-                                           TaskType taskType) {
+                                           TaskType taskType,
+                                           ScanTelemetry telemetry) {
         if (outcome.error != null) {
             String errorMessage = limitLength(outcome.error.getMessage(), 1000);
             saveCheckpoint(taskId, outcome.dirRelativePath, outcome.dirPathMd5,
@@ -355,21 +520,33 @@ public class PipelineScanService {
         String checkpointError = null;
 
         try {
+            long signatureStart = System.nanoTime();
             updateDirectorySignature(configId, outcome.dirInfo, outcome.dirPathMd5);
+            long elapsed = System.nanoTime() - signatureStart;
+            telemetry.recordSignatureUpdate(elapsed);
+            recordDuration("music.scan.db.signature_upsert.duration", elapsed,
+                    "task_type", taskType.name(), "result", "OK");
         } catch (Exception e) {
             checkpointStatus = "FAILED";
             checkpointFailedCount += 1;
             checkpointError = limitLength("目录签名更新失败: " + e.getMessage(), 1000);
             result.incrementFailedCount();
+            telemetry.recordSignatureUpdateFailed();
             incrementCounter("music.scan.dir.failed", 1, "task_type", taskType.name(), "stage", "SIGNATURE");
             log.warn("Update directory signature failed, taskId={}, dir={}",
                     taskId, outcome.dirRelativePath, e);
         }
 
         try {
+            long checkpointStart = System.nanoTime();
             saveCheckpoint(taskId, outcome.dirRelativePath, outcome.dirPathMd5,
                     checkpointStatus, outcome.fileCount, dirResult.processed, checkpointFailedCount, checkpointError);
+            long elapsed = System.nanoTime() - checkpointStart;
+            telemetry.recordCheckpointUpdate(elapsed);
+            recordDuration("music.scan.db.checkpoint_upsert.duration", elapsed,
+                    "task_type", taskType.name(), "result", "OK");
         } catch (Exception e) {
+            telemetry.recordCheckpointUpdateFailed();
             incrementCounter("music.scan.dir.failed", 1, "task_type", taskType.name(), "stage", "CHECKPOINT");
             log.warn("Save checkpoint failed, taskId={}, dir={}", taskId, outcome.dirRelativePath, e);
         }
@@ -389,7 +566,9 @@ public class PipelineScanService {
                                                    WebDavDirectoryInfo dirInfo,
                                                    String coverUrl, Set<String> supportedExtensions,
                                                    Set<String> lyricExtensions,
-                                                   boolean collectSeenForDelete) {
+                                                   boolean collectSeenForDelete,
+                                                   ScanTelemetry telemetry,
+                                                   TaskType taskType) {
         DirProcessResult dirResult = new DirProcessResult();
         List<TrackEntity> trackBatch = new ArrayList<>();
         List<String> seenMd5Batch = new ArrayList<>();
@@ -435,7 +614,7 @@ public class PipelineScanService {
                     if (!collectSeenForDelete) {
                         touchMd5Batch.add(pathMd5);
                         if (touchMd5Batch.size() >= dbBatchSize) {
-                            flushTouchedBatch(taskId, config.getId(), touchMd5Batch);
+                            flushTouchedBatch(taskId, config.getId(), touchMd5Batch, telemetry, taskType);
                         }
                     }
                     dirResult.skipped++;
@@ -453,7 +632,7 @@ public class PipelineScanService {
 
                 // Flush batch if needed
                 if (trackBatch.size() >= dbBatchSize) {
-                    flushTrackBatch(trackBatch);
+                    flushTrackBatch(trackBatch, telemetry, taskType);
                 }
             } catch (Exception e) {
                 dirResult.failed++;
@@ -464,15 +643,15 @@ public class PipelineScanService {
 
         // Flush remaining tracks
         if (!trackBatch.isEmpty()) {
-            flushTrackBatch(trackBatch);
+            flushTrackBatch(trackBatch, telemetry, taskType);
         }
         if (!touchMd5Batch.isEmpty()) {
-            flushTouchedBatch(taskId, config.getId(), touchMd5Batch);
+            flushTouchedBatch(taskId, config.getId(), touchMd5Batch, telemetry, taskType);
         }
 
         // Batch insert seen files
         if (collectSeenForDelete && !seenMd5Batch.isEmpty()) {
-            batchInsertSeenFiles(taskId, seenMd5Batch, dbBatchSize);
+            batchInsertSeenFiles(taskId, seenMd5Batch, dbBatchSize, telemetry, taskType);
         }
 
         return dirResult;
@@ -502,14 +681,24 @@ public class PipelineScanService {
         return result;
     }
 
-    private void flushTrackBatch(List<TrackEntity> batch) {
+    private void flushTrackBatch(List<TrackEntity> batch, ScanTelemetry telemetry, TaskType taskType) {
         if (batch.isEmpty()) {
             return;
         }
+        long startNanos = System.nanoTime();
+        int batchSize = batch.size();
         try {
             trackMapper.batchUpsert(batch);
+            long elapsed = System.nanoTime() - startNanos;
+            telemetry.recordBatchUpsert(elapsed, batchSize);
+            recordDuration("music.scan.db.batch_upsert.duration", elapsed,
+                    "task_type", taskType.name(), "result", "OK");
+            incrementCounter("music.scan.db.batch_upsert.rows", batchSize, "task_type", taskType.name());
         } catch (Exception e) {
             log.warn("Batch upsert failed, falling back to individual inserts", e);
+            telemetry.recordBatchUpsertFailed();
+            recordDuration("music.scan.db.batch_upsert.duration", System.nanoTime() - startNanos,
+                    "task_type", taskType.name(), "result", "ERROR");
             for (TrackEntity entity : batch) {
                 try {
                     trackMapper.upsert(entity);
@@ -521,25 +710,46 @@ public class PipelineScanService {
         batch.clear();
     }
 
-    private void flushTouchedBatch(Long taskId, Long configId, List<String> touchedPathMd5Batch) {
+    private void flushTouchedBatch(Long taskId, Long configId, List<String> touchedPathMd5Batch,
+                                   ScanTelemetry telemetry, TaskType taskType) {
         if (touchedPathMd5Batch.isEmpty()) {
             return;
         }
+        long startNanos = System.nanoTime();
+        int touchedCount = touchedPathMd5Batch.size();
         try {
             trackMapper.touchLastScanTaskByPathMd5In(taskId, configId, touchedPathMd5Batch);
+            long elapsed = System.nanoTime() - startNanos;
+            telemetry.recordTouchUpdate(elapsed, touchedCount);
+            recordDuration("music.scan.db.touch_by_md5.duration", elapsed,
+                    "task_type", taskType.name(), "result", "OK");
+            incrementCounter("music.scan.db.touch_by_md5.rows", touchedCount, "task_type", taskType.name());
         } catch (Exception e) {
+            telemetry.recordTouchUpdateFailed();
+            recordDuration("music.scan.db.touch_by_md5.duration", System.nanoTime() - startNanos,
+                    "task_type", taskType.name(), "result", "ERROR");
             log.warn("Batch touch last_scan_task_id failed, taskId={}, configId={}", taskId, configId, e);
         }
         touchedPathMd5Batch.clear();
     }
 
-    private void batchInsertSeenFiles(Long taskId, List<String> md5List, int batchSize) {
+    private void batchInsertSeenFiles(Long taskId, List<String> md5List, int batchSize,
+                                      ScanTelemetry telemetry, TaskType taskType) {
         for (int i = 0; i < md5List.size(); i += batchSize) {
             int end = Math.min(i + batchSize, md5List.size());
             List<String> subList = md5List.subList(i, end);
+            long startNanos = System.nanoTime();
             try {
                 scanTaskSeenFileMapper.batchInsert(taskId, subList);
+                long elapsed = System.nanoTime() - startNanos;
+                telemetry.recordSeenInsert(elapsed, subList.size());
+                recordDuration("music.scan.db.seen_insert.duration", elapsed,
+                        "task_type", taskType.name(), "result", "OK");
+                incrementCounter("music.scan.db.seen_insert.rows", subList.size(), "task_type", taskType.name());
             } catch (Exception e) {
+                telemetry.recordSeenInsertFailed();
+                recordDuration("music.scan.db.seen_insert.duration", System.nanoTime() - startNanos,
+                        "task_type", taskType.name(), "result", "ERROR");
                 log.warn("Batch insert seen files failed, falling back to individual inserts", e);
                 for (String md5 : subList) {
                     scanTaskSeenFileMapper.insert(taskId, md5);
@@ -560,7 +770,8 @@ public class PipelineScanService {
     }
 
     private void recordSeenFilesForDirectory(Long taskId, WebDavDirectoryInfo dirInfo,
-                                               Set<String> supportedExtensions) {
+                                             Set<String> supportedExtensions,
+                                             ScanTelemetry telemetry, TaskType taskType) {
         List<String> md5List = new ArrayList<>();
         for (WebDavFileObject file : dirInfo.getFiles()) {
             String relativePath = normalizeRelativePath(file.getRelativePath());
@@ -573,7 +784,8 @@ public class PipelineScanService {
             md5List.add(HashUtil.md5Hex(relativePath));
         }
         if (!md5List.isEmpty()) {
-            batchInsertSeenFiles(taskId, md5List, Math.max(10, appScanProperties.getDbBatchSize()));
+            batchInsertSeenFiles(taskId, md5List, Math.max(10, appScanProperties.getDbBatchSize()),
+                    telemetry, taskType);
         }
     }
 
@@ -918,7 +1130,249 @@ public class PipelineScanService {
         return hours + "h" + remainMinutes + "m" + remainSeconds + "s";
     }
 
+    private boolean shouldRunDedup(TaskType taskType, boolean dedupEnabled, ScanResult result) {
+        if (!dedupEnabled) {
+            return false;
+        }
+        int changedCount = result.getAddedCount() + result.getUpdatedCount() + result.getDeletedCount();
+        if (changedCount <= 0) {
+            log.info("DEDUP_DECISION skip reason=NO_CHANGE taskType={}", taskType.name());
+            return false;
+        }
+
+        if (taskType != TaskType.FULL) {
+            log.info("DEDUP_DECISION run reason=NON_FULL_TASK taskType={} changedCount={}",
+                    taskType.name(), changedCount);
+            return true;
+        }
+
+        int totalAudio = Math.max(result.getAudioFiles(), result.getTotalFiles());
+        int smallLibraryMax = Math.max(0, appScanProperties.getDedupAlwaysForSmallLibraryMaxFiles());
+        if (smallLibraryMax > 0 && totalAudio > 0 && totalAudio <= smallLibraryMax) {
+            log.info("DEDUP_DECISION run reason=SMALL_LIBRARY changedCount={} totalAudio={} smallMax={}",
+                    changedCount, totalAudio, smallLibraryMax);
+            return true;
+        }
+
+        int minChangedCount = Math.max(0, appScanProperties.getDedupMinChangedCount());
+        double minChangedRatio = Math.max(0D, appScanProperties.getDedupMinChangedRatio());
+        double changedRatio = totalAudio <= 0 ? 0D : (changedCount * 1.0D / totalAudio);
+        boolean byCount = changedCount >= minChangedCount;
+        boolean byRatio = changedRatio >= minChangedRatio;
+        if (byCount || byRatio) {
+            log.info("DEDUP_DECISION run reason={} changedCount={} changedRatio={} minCount={} minRatio={}",
+                    byCount ? "COUNT_THRESHOLD" : "RATIO_THRESHOLD",
+                    changedCount, String.format("%.5f", changedRatio), minChangedCount,
+                    String.format("%.5f", minChangedRatio));
+            return true;
+        }
+
+        log.info("DEDUP_DECISION skip reason=BELOW_THRESHOLD changedCount={} changedRatio={} minCount={} minRatio={}",
+                changedCount, String.format("%.5f", changedRatio), minChangedCount,
+                String.format("%.5f", minChangedRatio));
+        return false;
+    }
+
     // --- Inner classes ---
+
+    private static class ScanTelemetry {
+        private final Long taskId;
+        private final Long configId;
+        private final String taskType;
+
+        private final LongAdder listOkCount = new LongAdder();
+        private final LongAdder listErrCount = new LongAdder();
+        private final LongAdder listTotalNanos = new LongAdder();
+
+        private final LongAdder processOkCount = new LongAdder();
+        private final LongAdder processErrCount = new LongAdder();
+        private final LongAdder processTotalNanos = new LongAdder();
+
+        private final LongAdder batchUpsertCalls = new LongAdder();
+        private final LongAdder batchUpsertFailCalls = new LongAdder();
+        private final LongAdder batchUpsertRows = new LongAdder();
+        private final LongAdder batchUpsertTotalNanos = new LongAdder();
+
+        private final LongAdder touchByMd5Calls = new LongAdder();
+        private final LongAdder touchByMd5FailCalls = new LongAdder();
+        private final LongAdder touchByMd5Rows = new LongAdder();
+        private final LongAdder touchByMd5TotalNanos = new LongAdder();
+
+        private final LongAdder touchByPrefixCalls = new LongAdder();
+        private final LongAdder touchByPrefixFailCalls = new LongAdder();
+        private final LongAdder touchByPrefixTotalNanos = new LongAdder();
+
+        private final LongAdder seenInsertCalls = new LongAdder();
+        private final LongAdder seenInsertFailCalls = new LongAdder();
+        private final LongAdder seenInsertRows = new LongAdder();
+        private final LongAdder seenInsertTotalNanos = new LongAdder();
+
+        private final LongAdder signatureCalls = new LongAdder();
+        private final LongAdder signatureFailCalls = new LongAdder();
+        private final LongAdder signatureTotalNanos = new LongAdder();
+
+        private final LongAdder checkpointCalls = new LongAdder();
+        private final LongAdder checkpointFailCalls = new LongAdder();
+        private final LongAdder checkpointTotalNanos = new LongAdder();
+
+        private final LongAdder dedupCalls = new LongAdder();
+        private final LongAdder dedupAffectedRows = new LongAdder();
+        private final LongAdder dedupTotalNanos = new LongAdder();
+
+        private ScanTelemetry(Long taskId, Long configId, String taskType) {
+            this.taskId = taskId;
+            this.configId = configId;
+            this.taskType = taskType;
+        }
+
+        private void recordListSuccess(long nanos) {
+            listOkCount.increment();
+            listTotalNanos.add(Math.max(0L, nanos));
+        }
+
+        private void recordListFailed(long nanos) {
+            listErrCount.increment();
+            listTotalNanos.add(Math.max(0L, nanos));
+        }
+
+        private void recordProcessSuccess(long nanos) {
+            processOkCount.increment();
+            processTotalNanos.add(Math.max(0L, nanos));
+        }
+
+        private void recordProcessFailed(long nanos) {
+            processErrCount.increment();
+            processTotalNanos.add(Math.max(0L, nanos));
+        }
+
+        private void recordBatchUpsert(long nanos, int rows) {
+            batchUpsertCalls.increment();
+            batchUpsertRows.add(Math.max(0, rows));
+            batchUpsertTotalNanos.add(Math.max(0L, nanos));
+        }
+
+        private void recordBatchUpsertFailed() {
+            batchUpsertFailCalls.increment();
+        }
+
+        private void recordTouchUpdate(long nanos, int rows) {
+            touchByMd5Calls.increment();
+            touchByMd5Rows.add(Math.max(0, rows));
+            touchByMd5TotalNanos.add(Math.max(0L, nanos));
+        }
+
+        private void recordTouchUpdateFailed() {
+            touchByMd5FailCalls.increment();
+        }
+
+        private void recordTouchByPrefix(long nanos) {
+            touchByPrefixCalls.increment();
+            touchByPrefixTotalNanos.add(Math.max(0L, nanos));
+        }
+
+        private void recordTouchByPrefixFailed() {
+            touchByPrefixFailCalls.increment();
+        }
+
+        private void recordSeenInsert(long nanos, int rows) {
+            seenInsertCalls.increment();
+            seenInsertRows.add(Math.max(0, rows));
+            seenInsertTotalNanos.add(Math.max(0L, nanos));
+        }
+
+        private void recordSeenInsertFailed() {
+            seenInsertFailCalls.increment();
+        }
+
+        private void recordSignatureUpdate(long nanos) {
+            signatureCalls.increment();
+            signatureTotalNanos.add(Math.max(0L, nanos));
+        }
+
+        private void recordSignatureUpdateFailed() {
+            signatureFailCalls.increment();
+        }
+
+        private void recordCheckpointUpdate(long nanos) {
+            checkpointCalls.increment();
+            checkpointTotalNanos.add(Math.max(0L, nanos));
+        }
+
+        private void recordCheckpointUpdateFailed() {
+            checkpointFailCalls.increment();
+        }
+
+        private void recordDedup(long nanos, int affectedRows) {
+            dedupCalls.increment();
+            dedupAffectedRows.add(Math.max(0, affectedRows));
+            dedupTotalNanos.add(Math.max(0L, nanos));
+        }
+
+        private void logSummary(long elapsedMs, ScanResult result) {
+            log.info("SCAN_STAGE_SUMMARY taskId={} configId={} taskType={} elapsedMs={} "
+                            + "listOk={} listErr={} listAvgMs={} "
+                            + "procOk={} procErr={} procAvgMs={} "
+                            + "upsertCalls={} upsertFail={} upsertRows={} upsertAvgMs={} "
+                            + "touchMd5Calls={} touchMd5Fail={} touchMd5Rows={} touchMd5AvgMs={} "
+                            + "touchPrefixCalls={} touchPrefixFail={} touchPrefixAvgMs={} "
+                            + "seenCalls={} seenFail={} seenRows={} seenAvgMs={} "
+                            + "sigCalls={} sigFail={} sigAvgMs={} "
+                            + "ckptCalls={} ckptFail={} ckptAvgMs={} "
+                            + "dedupCalls={} dedupRows={} dedupAvgMs={} "
+                            + "added={} updated={} deleted={} failed={}",
+                    taskId, configId, taskType, elapsedMs,
+                    listOkCount.sum(), listErrCount.sum(), avgMs(listTotalNanos, add(listOkCount, listErrCount)),
+                    processOkCount.sum(), processErrCount.sum(), avgMs(processTotalNanos, add(processOkCount, processErrCount)),
+                    batchUpsertCalls.sum(), batchUpsertFailCalls.sum(), batchUpsertRows.sum(),
+                    avgMs(batchUpsertTotalNanos, batchUpsertCalls),
+                    touchByMd5Calls.sum(), touchByMd5FailCalls.sum(), touchByMd5Rows.sum(),
+                    avgMs(touchByMd5TotalNanos, touchByMd5Calls),
+                    touchByPrefixCalls.sum(), touchByPrefixFailCalls.sum(),
+                    avgMs(touchByPrefixTotalNanos, touchByPrefixCalls),
+                    seenInsertCalls.sum(), seenInsertFailCalls.sum(), seenInsertRows.sum(),
+                    avgMs(seenInsertTotalNanos, seenInsertCalls),
+                    signatureCalls.sum(), signatureFailCalls.sum(), avgMs(signatureTotalNanos, signatureCalls),
+                    checkpointCalls.sum(), checkpointFailCalls.sum(), avgMs(checkpointTotalNanos, checkpointCalls),
+                    dedupCalls.sum(), dedupAffectedRows.sum(), avgMs(dedupTotalNanos, dedupCalls),
+                    result.getAddedCount(), result.getUpdatedCount(), result.getDeletedCount(), result.getFailedCount());
+        }
+
+        private long add(LongAdder left, LongAdder right) {
+            return left.sum() + right.sum();
+        }
+
+        private String avgMs(LongAdder totalNanos, LongAdder calls) {
+            return avgMs(totalNanos, calls.sum());
+        }
+
+        private String avgMs(LongAdder totalNanos, long calls) {
+            if (calls <= 0) {
+                return "0.00";
+            }
+            double ms = totalNanos.sum() / 1_000_000.0D / calls;
+            return String.format(Locale.ROOT, "%.2f", ms);
+        }
+    }
+
+    private static class DirectoryListOutcome {
+        private final String dirUrl;
+        private final WebDavDirectoryInfo dirInfo;
+        private final Exception error;
+
+        private DirectoryListOutcome(String dirUrl, WebDavDirectoryInfo dirInfo, Exception error) {
+            this.dirUrl = dirUrl;
+            this.dirInfo = dirInfo;
+            this.error = error;
+        }
+
+        private static DirectoryListOutcome success(String dirUrl, WebDavDirectoryInfo dirInfo) {
+            return new DirectoryListOutcome(dirUrl, dirInfo, null);
+        }
+
+        private static DirectoryListOutcome failed(String dirUrl, Exception error) {
+            return new DirectoryListOutcome(dirUrl, null, error);
+        }
+    }
 
     private static class DirectoryTaskOutcome {
         private final WebDavDirectoryInfo dirInfo;

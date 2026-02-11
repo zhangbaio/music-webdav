@@ -49,14 +49,22 @@ app:
     audio-extensions: mp3,flac,m4a,aac,ogg,wav
     lyric-extensions: lrc,txt
     incremental-cron: "0 0 3 * * ?"
-    db-batch-size: 50
-    progress-persist-interval-sec: 30
+    db-batch-size: 200
+    progress-persist-interval-sec: 60
     metadata-head-bytes: 131072
     metadata-tail-bytes: 128
-    directory-process-thread-count: 4
-    directory-process-max-in-flight: 12
+    directory-list-thread-count: 8
+    directory-list-max-in-flight: 96
+    directory-process-thread-count: 8
+    directory-process-max-in-flight: 96
     incremental-directory-skip-enabled: true
     full-directory-skip-enabled: true
+    full-enable-delete-detection: true
+    full-enable-dedup: true
+    dedup-min-changed-count: 200
+    dedup-min-changed-ratio: 0.01
+    dedup-always-for-small-library-max-files: 5000
+    full-seen-delete-fallback-enabled: false
     incremental-enable-delete-detection: false
     incremental-enable-dedup: false
   playlist:
