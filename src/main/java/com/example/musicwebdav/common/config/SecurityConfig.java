@@ -39,6 +39,7 @@ public class SecurityConfig {
                         "/swagger-ui/**",
                         "/swagger-ui.html",
                         "/music-player.html",
+                        "/webdav-manager.html",
                         "/favicon.ico")
                 .permitAll()
                 .anyRequest().authenticated()

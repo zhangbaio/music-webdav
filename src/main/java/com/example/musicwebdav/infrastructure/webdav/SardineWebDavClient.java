@@ -144,6 +144,20 @@ public class SardineWebDavClient implements WebDavClient {
     }
 
     @Override
+    public void delete(String username, String password, String targetUrl) {
+        Sardine sardine = SardineFactory.begin(username, password);
+        try {
+            sardine.delete(ensureDirectoryUrl(targetUrl));
+        } catch (SardineException e) {
+            throw new IllegalStateException(mapSardineException(e), e);
+        } catch (IOException e) {
+            throw new IllegalStateException("删除WebDAV目录失败：" + e.getMessage(), e);
+        } finally {
+            shutdownSafely(sardine);
+        }
+    }
+
+    @Override
     public Sardine createSession(String username, String password) {
         return SardineFactory.begin(username, password);
     }

@@ -19,6 +19,9 @@ public interface WebDavClient {
 
     void downloadToOutputStream(String username, String password, String fileUrl, OutputStream outputStream) throws IOException;
 
+    /** Delete a remote directory (or file) by absolute WebDAV URL. */
+    void delete(String username, String password, String targetUrl);
+
     /** Create a reusable Sardine session for connection pooling within a scan task. */
     Sardine createSession(String username, String password);
 
