@@ -4,6 +4,7 @@ import com.example.musicwebdav.api.response.PageResponse;
 import com.example.musicwebdav.api.response.TrackDetailResponse;
 import com.example.musicwebdav.api.response.TrackResponse;
 import com.example.musicwebdav.infrastructure.persistence.entity.TrackEntity;
+import com.example.musicwebdav.infrastructure.persistence.mapper.PlaylistTrackMapper;
 import com.example.musicwebdav.infrastructure.persistence.mapper.TrackMapper;
 import java.util.Arrays;
 import java.util.Collections;
@@ -22,9 +23,11 @@ public class TrackQueryService {
     );
 
     private final TrackMapper trackMapper;
+    private final PlaylistTrackMapper playlistTrackMapper;
 
-    public TrackQueryService(TrackMapper trackMapper) {
+    public TrackQueryService(TrackMapper trackMapper, PlaylistTrackMapper playlistTrackMapper) {
         this.trackMapper = trackMapper;
+        this.playlistTrackMapper = playlistTrackMapper;
     }
 
     public PageResponse<TrackResponse> listTracks(int pageNo,
@@ -54,6 +57,22 @@ public class TrackQueryService {
         }
         int safeLimit = limit == null ? 50 : Math.max(1, Math.min(100, limit));
         return trackMapper.search(safeKeyword, safeLimit).stream().map(this::toResponse).collect(Collectors.toList());
+    }
+
+    public PageResponse<TrackResponse> listAggregatedTracks(int pageNo,
+                                                            int pageSize,
+                                                            String keyword,
+                                                            String sortBy,
+                                                            String sortOrder) {
+        int safePageNo = Math.max(1, pageNo);
+        int safePageSize = Math.max(1, Math.min(200, pageSize));
+        int offset = (safePageNo - 1) * safePageSize;
+        String normalizedSortBy = normalizeSortBy(sortBy);
+        String normalizedSortOrder = normalizeSortOrder(sortOrder);
+        List<TrackEntity> rows = playlistTrackMapper.selectAggregatedTrackPage(
+                offset, safePageSize, keyword, normalizedSortBy, normalizedSortOrder);
+        long total = playlistTrackMapper.countAggregatedTracks(keyword);
+        return new PageResponse<>(rows.stream().map(this::toResponse).collect(Collectors.toList()), total, safePageNo, safePageSize);
     }
 
     public TrackDetailResponse getTrack(Long id) {

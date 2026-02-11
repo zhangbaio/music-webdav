@@ -44,6 +44,18 @@ public class TrackController {
                 trackQueryService.listTracks(pageNo, pageSize, keyword, artist, album, genre, year, sortBy, sortOrder));
     }
 
+    @GetMapping("/aggregate")
+    public ApiResponse<PageResponse<TrackResponse>> listAggregatedTracks(
+            @RequestParam(value = "pageNo", defaultValue = "1") int pageNo,
+            @RequestParam(value = "pageSize", defaultValue = "20") int pageSize,
+            @RequestParam(value = "keyword", required = false) String keyword,
+            @RequestParam(value = "sortBy", required = false) String sortBy,
+            @RequestParam(value = "sortOrder", required = false) String sortOrder
+    ) {
+        return ApiResponse.success(
+                trackQueryService.listAggregatedTracks(pageNo, pageSize, keyword, sortBy, sortOrder));
+    }
+
     @GetMapping("/search")
     public ApiResponse<List<TrackResponse>> search(@RequestParam("q") String keyword,
                                                    @RequestParam(value = "limit", required = false) Integer limit) {

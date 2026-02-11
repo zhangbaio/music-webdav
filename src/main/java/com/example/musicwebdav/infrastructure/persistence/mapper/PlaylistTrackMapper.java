@@ -74,4 +74,64 @@ public interface PlaylistTrackMapper {
             + "INNER JOIN track t ON t.id = pt.track_id "
             + "WHERE pt.playlist_id = #{playlistId} AND t.is_deleted = 0")
     long countTracks(@Param("playlistId") Long playlistId);
+
+    @Select("<script>"
+            + "SELECT t.id, t.title, t.artist, t.album, t.source_path, t.duration_sec, t.has_lyric "
+            + "FROM ("
+            + "  SELECT pt.track_id "
+            + "  FROM playlist_track pt "
+            + "  INNER JOIN playlist p ON p.id = pt.playlist_id "
+            + "  WHERE p.is_deleted = 0 "
+            + "  GROUP BY pt.track_id"
+            + ") agg "
+            + "INNER JOIN track t ON t.id = agg.track_id "
+            + "WHERE t.is_deleted = 0 "
+            + "<if test='keyword != null and keyword != \"\"'>"
+            + " AND (t.title LIKE CONCAT('%', #{keyword}, '%') "
+            + "   OR t.artist LIKE CONCAT('%', #{keyword}, '%') "
+            + "   OR t.album LIKE CONCAT('%', #{keyword}, '%'))"
+            + "</if>"
+            + " ORDER BY "
+            + "<choose>"
+            + "  <when test='sortBy == \"title\"'>t.title</when>"
+            + "  <when test='sortBy == \"artist\"'>t.artist</when>"
+            + "  <when test='sortBy == \"album\"'>t.album</when>"
+            + "  <when test='sortBy == \"year\"'>t.`year`</when>"
+            + "  <when test='sortBy == \"created_at\"'>t.created_at</when>"
+            + "  <otherwise>t.updated_at</otherwise>"
+            + "</choose>"
+            + " "
+            + "<choose>"
+            + "  <when test='sortOrder == \"ASC\"'>ASC</when>"
+            + "  <otherwise>DESC</otherwise>"
+            + "</choose>"
+            + ", t.id DESC "
+            + "LIMIT #{offset}, #{pageSize}"
+            + "</script>")
+    List<TrackEntity> selectAggregatedTrackPage(@Param("offset") int offset,
+                                                @Param("pageSize") int pageSize,
+                                                @Param("keyword") String keyword,
+                                                @Param("sortBy") String sortBy,
+                                                @Param("sortOrder") String sortOrder);
+
+    @Select("<script>"
+            + "SELECT COUNT(1) FROM ("
+            + "  SELECT t.id "
+            + "  FROM ("
+            + "    SELECT pt.track_id "
+            + "    FROM playlist_track pt "
+            + "    INNER JOIN playlist p ON p.id = pt.playlist_id "
+            + "    WHERE p.is_deleted = 0 "
+            + "    GROUP BY pt.track_id"
+            + "  ) agg "
+            + "  INNER JOIN track t ON t.id = agg.track_id "
+            + "  WHERE t.is_deleted = 0 "
+            + "  <if test='keyword != null and keyword != \"\"'>"
+            + "   AND (t.title LIKE CONCAT('%', #{keyword}, '%') "
+            + "     OR t.artist LIKE CONCAT('%', #{keyword}, '%') "
+            + "     OR t.album LIKE CONCAT('%', #{keyword}, '%'))"
+            + "  </if>"
+            + ") c"
+            + "</script>")
+    long countAggregatedTracks(@Param("keyword") String keyword);
 }
