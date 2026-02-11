@@ -1,6 +1,7 @@
 package com.example.musicwebdav.application.service;
 
 import com.example.musicwebdav.infrastructure.persistence.entity.WebDavConfigEntity;
+import com.example.musicwebdav.domain.enumtype.TaskType;
 import java.util.Set;
 import java.util.function.BooleanSupplier;
 import org.slf4j.Logger;
@@ -27,10 +28,10 @@ public class FullScanService {
      * @param resumedCheckpoints set of dir path MD5s from a previous task to skip (for resume)
      * @return scan statistics
      */
-    public ScanStats scan(Long taskId, WebDavConfigEntity config,
+    public ScanStats scan(Long taskId, TaskType taskType, WebDavConfigEntity config,
                            BooleanSupplier cancelSignal, Set<String> resumedCheckpoints) {
         PipelineScanService.ScanResult result = pipelineScanService.scan(
-                taskId, config, cancelSignal, resumedCheckpoints);
+                taskId, taskType, config, cancelSignal, resumedCheckpoints);
         return toScanStats(result);
     }
 

@@ -11,6 +11,8 @@ import com.example.musicwebdav.infrastructure.webdav.WebDavClient;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import javax.servlet.http.HttpServletResponse;
 import org.slf4j.Logger;
@@ -39,24 +41,28 @@ public class TrackPlaybackService {
         this.appSecurityProperties = appSecurityProperties;
     }
 
-    public void redirectToWebDav(Long trackId, HttpServletResponse response) {
+    public void redirectToProxy(Long trackId,
+                                String requestToken,
+                                String backendBaseUrl,
+                                HttpServletResponse response) {
         TrackEntity track = trackMapper.selectById(trackId);
         if (track == null) {
             throw new BusinessException("404", "歌曲不存在");
         }
-        if (track.getSourceConfigId() == null) {
-            throw new BusinessException("500", "歌曲来源配置缺失");
+        String normalizedBaseUrl = backendBaseUrl == null ? "" : backendBaseUrl.trim();
+        if (normalizedBaseUrl.endsWith("/")) {
+            normalizedBaseUrl = normalizedBaseUrl.substring(0, normalizedBaseUrl.length() - 1);
         }
-
-        WebDavConfigEntity config = webDavConfigMapper.selectById(track.getSourceConfigId());
-        if (config == null) {
-            throw new BusinessException("404", "歌曲来源配置不存在");
+        String fileUrl = normalizedBaseUrl + "/api/v1/tracks/" + trackId + "/stream-proxy";
+        if (StringUtils.hasText(requestToken)) {
+            fileUrl = fileUrl + "?token=" + UriUtils.encodeQueryParam(requestToken, StandardCharsets.UTF_8.name());
         }
-
-        String fileUrl = buildFileUrl(config, track.getSourcePath());
-        response.setStatus(HttpServletResponse.SC_FOUND);
-        response.setHeader("Location", fileUrl);
-        response.setHeader("Cache-Control", "no-store");
+        try {
+            response.setHeader("Cache-Control", "no-store");
+            response.sendRedirect(fileUrl);
+        } catch (IOException e) {
+            throw new BusinessException("500", "播放重定向失败：" + e.getMessage());
+        }
     }
 
     public void proxyTrackStream(Long trackId, HttpServletResponse response) {
@@ -88,6 +94,10 @@ public class TrackPlaybackService {
             webDavClient.downloadToOutputStream(
                     config.getUsername(), decryptedPassword, streamUrl, response.getOutputStream());
         } catch (IOException e) {
+            if (isClientAbort(e)) {
+                log.warn("Client aborted audio stream, trackId={}, streamUrl={}", trackId, streamUrl);
+                return;
+            }
             log.error("Failed to proxy audio stream for trackId={}, streamUrl={}", trackId, streamUrl, e);
             throw new BusinessException("500", "音频流读取失败：" + e.getMessage());
         }
@@ -128,6 +138,10 @@ public class TrackPlaybackService {
             webDavClient.downloadToOutputStream(config.getUsername(), decryptedPassword,
                     coverUrl, response.getOutputStream());
         } catch (IOException e) {
+            if (isClientAbort(e)) {
+                log.warn("Client aborted cover stream, trackId={}, coverUrl={}", trackId, coverUrl);
+                return;
+            }
             log.error("Failed to proxy cover art for trackId={}, coverUrl={}", trackId, coverUrl, e);
             throw new BusinessException("500", "封面下载失败：" + e.getMessage());
         }
@@ -217,5 +231,26 @@ public class TrackPlaybackService {
             return "image/bmp";
         }
         return "image/jpeg";
+    }
+
+    private boolean isClientAbort(Throwable throwable) {
+        List<String> signals = new ArrayList<>();
+        signals.add("clientabortexception");
+        signals.add("broken pipe");
+        signals.add("connection reset by peer");
+        signals.add("stream is closed");
+
+        Throwable current = throwable;
+        while (current != null) {
+            String className = current.getClass().getName().toLowerCase(Locale.ROOT);
+            String message = current.getMessage() == null ? "" : current.getMessage().toLowerCase(Locale.ROOT);
+            for (String signal : signals) {
+                if (className.contains(signal) || message.contains(signal)) {
+                    return true;
+                }
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 }

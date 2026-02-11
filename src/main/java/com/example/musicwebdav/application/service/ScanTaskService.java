@@ -47,8 +47,12 @@ public class ScanTaskService {
         if (config == null) {
             throw new BusinessException("404", "WebDAV配置不存在");
         }
-        if (TaskType.FULL != request.getTaskType()) {
-            throw new BusinessException("400", "当前版本仅支持 FULL 全量扫描");
+        TaskType taskType = request.getTaskType();
+        if (taskType == null) {
+            throw new BusinessException("400", "taskType不能为空");
+        }
+        if (scanTaskMapper.countActiveByConfigId(request.getConfigId()) > 0) {
+            throw new BusinessException("409", "该WebDAV配置已有扫描任务正在执行");
         }
 
         // Load resume checkpoints if resumeFromTaskId is specified
@@ -60,7 +64,7 @@ public class ScanTaskService {
         }
 
         ScanTaskEntity entity = new ScanTaskEntity();
-        entity.setTaskType(request.getTaskType().name());
+        entity.setTaskType(taskType.name());
         entity.setStatus(TaskStatus.PENDING.name());
         entity.setConfigId(request.getConfigId());
         entity.setTotalFiles(0);
@@ -77,7 +81,7 @@ public class ScanTaskService {
 
         final Set<String> finalResumedCheckpoints = resumedCheckpoints;
         try {
-            scanTaskExecutor.submit(() -> executeFullTask(entity.getId(), config, finalResumedCheckpoints));
+            scanTaskExecutor.submit(() -> executeScanTask(entity.getId(), taskType, config, finalResumedCheckpoints));
         } catch (RejectedExecutionException e) {
             scanTaskMapper.markFailedBeforeRunning(
                     entity.getId(),
@@ -112,16 +116,18 @@ public class ScanTaskService {
         return true;
     }
 
-    private void executeFullTask(Long taskId, WebDavConfigEntity config, Set<String> resumedCheckpoints) {
+    private void executeScanTask(Long taskId, TaskType taskType, WebDavConfigEntity config,
+                                 Set<String> resumedCheckpoints) {
         int runningUpdated = scanTaskMapper.markRunning(taskId, TaskStatus.RUNNING.name());
         if (runningUpdated == 0) {
             String currentStatus = scanTaskMapper.selectStatusById(taskId);
             log.info("SCAN_TASK_START_SKIPPED taskId={} currentStatus={}", taskId, currentStatus);
             return;
         }
-        log.info("SCAN_TASK_RUNNING taskId={} type={} configId={}", taskId, TaskType.FULL.name(), config.getId());
+        log.info("SCAN_TASK_RUNNING taskId={} type={} configId={}", taskId, taskType.name(), config.getId());
         try {
-            FullScanService.ScanStats stats = fullScanService.scan(taskId, config, () -> isCanceled(taskId), resumedCheckpoints);
+            FullScanService.ScanStats stats = fullScanService.scan(
+                    taskId, taskType, config, () -> isCanceled(taskId), resumedCheckpoints);
             if (stats.isCanceled()) {
                 scanTaskMapper.updateCanceledStats(
                         taskId,

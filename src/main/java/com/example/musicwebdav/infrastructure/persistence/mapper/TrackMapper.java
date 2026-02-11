@@ -56,11 +56,41 @@ public interface TrackMapper {
     TrackEntity selectByConfigAndPathMd5(@Param("sourceConfigId") Long sourceConfigId,
                                          @Param("sourcePathMd5") String sourcePathMd5);
 
+    @Select("<script>"
+            + "SELECT id, source_config_id, source_path, source_path_md5, source_etag, source_last_modified, source_size, mime_type, content_hash, "
+            + "title, artist, album, album_artist, track_no, disc_no, `year`, genre, duration_sec, bitrate, sample_rate, channels, "
+            + "has_cover, cover_art_url, has_lyric, lyric_path, is_deleted, last_scan_task_id, created_at, updated_at "
+            + "FROM track WHERE source_config_id = #{sourceConfigId} "
+            + "AND source_path_md5 IN "
+            + "<foreach item='md5' collection='sourcePathMd5List' open='(' separator=',' close=')'>"
+            + "#{md5}"
+            + "</foreach>"
+            + "</script>")
+    List<TrackEntity> selectByConfigAndPathMd5In(@Param("sourceConfigId") Long sourceConfigId,
+                                                 @Param("sourcePathMd5List") List<String> sourcePathMd5List);
+
     @Update("UPDATE track t LEFT JOIN scan_task_seen_file s "
             + "ON s.task_id = #{taskId} AND s.source_path_md5 = t.source_path_md5 "
             + "SET t.is_deleted = 1, t.updated_at = NOW() "
             + "WHERE s.id IS NULL AND t.is_deleted = 0 AND t.source_config_id = #{configId}")
     int softDeleteByTaskId(@Param("taskId") Long taskId, @Param("configId") Long configId);
+
+    @Update("UPDATE track SET is_deleted = 1, updated_at = NOW() "
+            + "WHERE is_deleted = 0 AND source_config_id = #{configId} "
+            + "AND (last_scan_task_id IS NULL OR last_scan_task_id <> #{taskId})")
+    int softDeleteByLastScanTaskId(@Param("taskId") Long taskId, @Param("configId") Long configId);
+
+    @Update("<script>"
+            + "UPDATE track SET last_scan_task_id = #{taskId} "
+            + "WHERE is_deleted = 0 AND source_config_id = #{configId} "
+            + "AND source_path_md5 IN "
+            + "<foreach item='md5' collection='sourcePathMd5List' open='(' separator=',' close=')'>"
+            + "#{md5}"
+            + "</foreach>"
+            + "</script>")
+    int touchLastScanTaskByPathMd5In(@Param("taskId") Long taskId,
+                                     @Param("configId") Long configId,
+                                     @Param("sourcePathMd5List") List<String> sourcePathMd5List);
 
     @Select("<script>"
             + "SELECT id, title, artist, album, source_path, duration_sec, has_lyric "

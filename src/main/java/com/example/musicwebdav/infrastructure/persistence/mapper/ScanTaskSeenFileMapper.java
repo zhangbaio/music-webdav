@@ -1,6 +1,7 @@
 package com.example.musicwebdav.infrastructure.persistence.mapper;
 
 import java.util.List;
+import org.apache.ibatis.annotations.Delete;
 import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
@@ -13,4 +14,7 @@ public interface ScanTaskSeenFileMapper {
 
     /** Batch insert seen files. Defined in ScanTaskSeenFileMapper.xml */
     int batchInsert(@Param("taskId") Long taskId, @Param("md5List") List<String> md5List);
+
+    @Delete("DELETE FROM scan_task_seen_file WHERE task_id = #{taskId}")
+    int deleteByTaskId(@Param("taskId") Long taskId);
 }

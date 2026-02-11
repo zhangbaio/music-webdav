@@ -4,6 +4,7 @@ import com.example.musicwebdav.common.config.AppScanProperties;
 import com.example.musicwebdav.common.config.AppSecurityProperties;
 import com.example.musicwebdav.common.util.AesCryptoUtil;
 import com.example.musicwebdav.common.util.HashUtil;
+import com.example.musicwebdav.domain.enumtype.TaskType;
 import com.example.musicwebdav.domain.model.AudioMetadata;
 import com.example.musicwebdav.domain.model.WebDavDirectoryInfo;
 import com.example.musicwebdav.domain.model.WebDavFileObject;
@@ -79,7 +80,7 @@ public class PipelineScanService {
         this.appScanProperties = appScanProperties;
     }
 
-    public ScanResult scan(Long taskId, WebDavConfigEntity config,
+    public ScanResult scan(Long taskId, TaskType taskType, WebDavConfigEntity config,
                             BooleanSupplier cancelSignal, Set<String> resumedCheckpoints) {
         ScanResult result = new ScanResult();
         String plainPassword = AesCryptoUtil.decrypt(config.getPasswordEnc(), appSecurityProperties.getEncryptKey());
@@ -95,10 +96,15 @@ public class PipelineScanService {
         log.info("PIPELINE_SCAN_START taskId={} configId={} configName={} rootUrl={}",
                 taskId, config.getId(), config.getName(), rootUrl);
         log.info("PIPELINE_SCAN_METADATA_MODE taskId={} mode=WEBDAV_INFER_ONLY", taskId);
-        // Current API only exposes FULL scan. To avoid false negatives ("full scan but no writes"),
-        // disable directory-signature short-circuit and always process directories.
-        final boolean directorySkipEnabled = false;
-        log.info("PIPELINE_SCAN_DIRECTORY_SKIP taskId={} enabled={}", taskId, directorySkipEnabled);
+        boolean isIncremental = TaskType.INCREMENTAL == taskType;
+        final boolean directorySkipEnabled = isIncremental && appScanProperties.isIncrementalDirectorySkipEnabled();
+        final boolean deleteDetectionEnabled = !isIncremental || appScanProperties.isIncrementalEnableDeleteDetection();
+        final boolean dedupEnabled = !isIncremental || appScanProperties.isIncrementalEnableDedup();
+        final boolean hasResumeCheckpoints = resumedCheckpoints != null && !resumedCheckpoints.isEmpty();
+        // When directories may be skipped (resume or signature-skip), deletion needs seen-file fallback.
+        final boolean useSeenBasedDelete = deleteDetectionEnabled && (hasResumeCheckpoints || directorySkipEnabled);
+        log.info("PIPELINE_SCAN_SWITCHES taskId={} taskType={} directorySkip={} deleteDetection={} dedup={} seenDelete={}",
+                taskId, taskType.name(), directorySkipEnabled, deleteDetectionEnabled, dedupEnabled, useSeenBasedDelete);
 
         Sardine session = webDavClient.createSession(config.getUsername(), plainPassword);
         try {
@@ -143,7 +149,9 @@ public class PipelineScanService {
 
                 // Check resume checkpoint
                 if (resumedCheckpoints != null && resumedCheckpoints.contains(dirPathMd5)) {
-                    recordSeenFilesForDirectory(taskId, dirInfo, supportedExtensions);
+                    if (useSeenBasedDelete) {
+                        recordSeenFilesForDirectory(taskId, dirInfo, supportedExtensions);
+                    }
                     tracker.onDirectorySkipped(dirInfo.getRelativePath());
                     logIfNeeded(tracker);
                     continue;
@@ -151,7 +159,9 @@ public class PipelineScanService {
 
                 // Check directory signature (incremental)
                 if (directorySkipEnabled && isDirectoryUnchanged(config.getId(), dirInfo, dirPathMd5)) {
-                    recordSeenFilesForDirectory(taskId, dirInfo, supportedExtensions);
+                    if (useSeenBasedDelete) {
+                        recordSeenFilesForDirectory(taskId, dirInfo, supportedExtensions);
+                    }
                     tracker.onDirectorySkipped(dirInfo.getRelativePath());
                     logIfNeeded(tracker);
                     continue;
@@ -162,7 +172,7 @@ public class PipelineScanService {
 
                 // Process files in this directory
                 DirProcessResult dirResult = processDirectoryFiles(
-                        taskId, config, dirInfo, coverUrl, supportedExtensions, lyricExtensions);
+                        taskId, config, dirInfo, coverUrl, supportedExtensions, lyricExtensions, useSeenBasedDelete);
                 result.addDirResult(dirResult);
 
                 // Update directory signature
@@ -187,10 +197,16 @@ public class PipelineScanService {
 
             // Post-scan: soft-delete + dedup
             if (!result.isCanceled()) {
-                int deleted = trackMapper.softDeleteByTaskId(taskId, config.getId());
-                result.setDeletedCount(deleted);
-                int deduped = duplicateFilterService.deduplicateTracks(config.getId());
-                result.setDeduplicatedCount(deduped);
+                if (deleteDetectionEnabled) {
+                    int deleted = useSeenBasedDelete
+                            ? trackMapper.softDeleteByTaskId(taskId, config.getId())
+                            : trackMapper.softDeleteByLastScanTaskId(taskId, config.getId());
+                    result.setDeletedCount(deleted);
+                }
+                if (dedupEnabled) {
+                    int deduped = duplicateFilterService.deduplicateTracks(config.getId());
+                    result.setDeduplicatedCount(deduped);
+                }
             }
 
             // Final progress persist
@@ -198,6 +214,7 @@ public class PipelineScanService {
 
         } finally {
             webDavClient.closeSession(session);
+            cleanupSeenFiles(taskId);
         }
 
         log.info("PIPELINE_SCAN_FINISH taskId={} totalFiles={} audioFiles={} added={} updated={} deleted={} "
@@ -210,12 +227,15 @@ public class PipelineScanService {
     }
 
     private DirProcessResult processDirectoryFiles(Long taskId, WebDavConfigEntity config,
-                                                     WebDavDirectoryInfo dirInfo,
-                                                     String coverUrl, Set<String> supportedExtensions,
-                                                     Set<String> lyricExtensions) {
+                                                   WebDavDirectoryInfo dirInfo,
+                                                   String coverUrl, Set<String> supportedExtensions,
+                                                   Set<String> lyricExtensions,
+                                                   boolean collectSeenForDelete) {
         DirProcessResult dirResult = new DirProcessResult();
         List<TrackEntity> trackBatch = new ArrayList<>();
         List<String> seenMd5Batch = new ArrayList<>();
+        List<String> touchMd5Batch = new ArrayList<>();
+        List<AudioCandidate> audioCandidates = new ArrayList<>();
         Map<String, String> lyricPathIndex = buildLyricPathIndex(dirInfo.getFiles(), lyricExtensions);
         int dbBatchSize = Math.max(10, appScanProperties.getDbBatchSize());
 
@@ -224,25 +244,41 @@ public class PipelineScanService {
             if (!StringUtils.hasText(relativePath)) {
                 continue;
             }
-            String pathMd5 = HashUtil.md5Hex(relativePath);
-            seenMd5Batch.add(pathMd5);
-
             if (!isAudioFile(relativePath, supportedExtensions)) {
                 dirResult.skipped++;
                 continue;
             }
 
+            String pathMd5 = HashUtil.md5Hex(relativePath);
+            audioCandidates.add(new AudioCandidate(file, relativePath, pathMd5));
             dirResult.audioFiles++;
 
+            if (collectSeenForDelete) {
+                seenMd5Batch.add(pathMd5);
+            }
+        }
+
+        Map<String, TrackEntity> existingMap = loadExistingTrackMap(config.getId(), audioCandidates, dbBatchSize);
+        for (AudioCandidate candidate : audioCandidates) {
+            String relativePath = candidate.relativePath;
+            String pathMd5 = candidate.pathMd5;
+            WebDavFileObject file = candidate.file;
             try {
-                TrackEntity existing = trackMapper.selectByConfigAndPathMd5(config.getId(), pathMd5);
+                TrackEntity existing = existingMap.get(pathMd5);
                 // Pure WebDAV infer mode may evolve over time; recompute metadata from path/dir and
                 // upsert when inferred fields differ, even if file fingerprint is unchanged.
                 AudioMetadata metadata = new AudioMetadata();
                 String lyricPath = resolveLyricPath(relativePath, lyricPathIndex);
                 TrackEntity entity = buildTrackEntity(taskId, config.getId(), relativePath, pathMd5,
                         file, metadata, coverUrl, lyricPath);
-                if (sameFingerprint(existing, file) && sameTrackMetadata(existing, entity)) {
+                boolean activeExisting = existing != null && !Objects.equals(existing.getIsDeleted(), 1);
+                if (activeExisting && sameFingerprint(existing, file) && sameTrackMetadata(existing, entity)) {
+                    if (!collectSeenForDelete) {
+                        touchMd5Batch.add(pathMd5);
+                        if (touchMd5Batch.size() >= dbBatchSize) {
+                            flushTouchedBatch(taskId, config.getId(), touchMd5Batch);
+                        }
+                    }
                     dirResult.skipped++;
                     continue;
                 }
@@ -271,13 +307,40 @@ public class PipelineScanService {
         if (!trackBatch.isEmpty()) {
             flushTrackBatch(trackBatch);
         }
+        if (!touchMd5Batch.isEmpty()) {
+            flushTouchedBatch(taskId, config.getId(), touchMd5Batch);
+        }
 
         // Batch insert seen files
-        if (!seenMd5Batch.isEmpty()) {
+        if (collectSeenForDelete && !seenMd5Batch.isEmpty()) {
             batchInsertSeenFiles(taskId, seenMd5Batch, dbBatchSize);
         }
 
         return dirResult;
+    }
+
+    private Map<String, TrackEntity> loadExistingTrackMap(Long configId, List<AudioCandidate> audioCandidates,
+                                                          int dbBatchSize) {
+        Map<String, TrackEntity> result = new HashMap<>();
+        if (audioCandidates.isEmpty()) {
+            return result;
+        }
+
+        Set<String> uniqueMd5 = new HashSet<>();
+        for (AudioCandidate candidate : audioCandidates) {
+            uniqueMd5.add(candidate.pathMd5);
+        }
+        List<String> md5List = new ArrayList<>(uniqueMd5);
+        int queryBatchSize = Math.max(200, dbBatchSize * 4);
+        for (int i = 0; i < md5List.size(); i += queryBatchSize) {
+            int end = Math.min(i + queryBatchSize, md5List.size());
+            List<String> subList = md5List.subList(i, end);
+            List<TrackEntity> rows = trackMapper.selectByConfigAndPathMd5In(configId, subList);
+            for (TrackEntity row : rows) {
+                result.put(row.getSourcePathMd5(), row);
+            }
+        }
+        return result;
     }
 
     private void flushTrackBatch(List<TrackEntity> batch) {
@@ -299,6 +362,18 @@ public class PipelineScanService {
         batch.clear();
     }
 
+    private void flushTouchedBatch(Long taskId, Long configId, List<String> touchedPathMd5Batch) {
+        if (touchedPathMd5Batch.isEmpty()) {
+            return;
+        }
+        try {
+            trackMapper.touchLastScanTaskByPathMd5In(taskId, configId, touchedPathMd5Batch);
+        } catch (Exception e) {
+            log.warn("Batch touch last_scan_task_id failed, taskId={}, configId={}", taskId, configId, e);
+        }
+        touchedPathMd5Batch.clear();
+    }
+
     private void batchInsertSeenFiles(Long taskId, List<String> md5List, int batchSize) {
         for (int i = 0; i < md5List.size(); i += batchSize) {
             int end = Math.min(i + batchSize, md5List.size());
@@ -314,14 +389,29 @@ public class PipelineScanService {
         }
     }
 
+    private void cleanupSeenFiles(Long taskId) {
+        try {
+            int deleted = scanTaskSeenFileMapper.deleteByTaskId(taskId);
+            if (deleted > 0) {
+                log.debug("Cleaned seen-file rows, taskId={}, rows={}", taskId, deleted);
+            }
+        } catch (Exception e) {
+            log.warn("Cleanup seen-file rows failed, taskId={}", taskId, e);
+        }
+    }
+
     private void recordSeenFilesForDirectory(Long taskId, WebDavDirectoryInfo dirInfo,
                                                Set<String> supportedExtensions) {
         List<String> md5List = new ArrayList<>();
         for (WebDavFileObject file : dirInfo.getFiles()) {
             String relativePath = normalizeRelativePath(file.getRelativePath());
-            if (StringUtils.hasText(relativePath)) {
-                md5List.add(HashUtil.md5Hex(relativePath));
+            if (!StringUtils.hasText(relativePath)) {
+                continue;
             }
+            if (!isAudioFile(relativePath, supportedExtensions)) {
+                continue;
+            }
+            md5List.add(HashUtil.md5Hex(relativePath));
         }
         if (!md5List.isEmpty()) {
             batchInsertSeenFiles(taskId, md5List, Math.max(10, appScanProperties.getDbBatchSize()));
@@ -620,6 +710,18 @@ public class PipelineScanService {
     }
 
     // --- Inner classes ---
+
+    private static class AudioCandidate {
+        private final WebDavFileObject file;
+        private final String relativePath;
+        private final String pathMd5;
+
+        private AudioCandidate(WebDavFileObject file, String relativePath, String pathMd5) {
+            this.file = file;
+            this.relativePath = relativePath;
+            this.pathMd5 = pathMd5;
+        }
+    }
 
     static class DirProcessResult {
         int processed;

@@ -4,9 +4,11 @@ import com.example.musicwebdav.api.response.ApiResponse;
 import com.example.musicwebdav.api.response.PageResponse;
 import com.example.musicwebdav.api.response.TrackDetailResponse;
 import com.example.musicwebdav.api.response.TrackResponse;
+import com.example.musicwebdav.common.exception.BusinessException;
 import com.example.musicwebdav.application.service.TrackPlaybackService;
 import com.example.musicwebdav.application.service.TrackQueryService;
 import java.util.List;
+import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -58,13 +60,27 @@ public class TrackController {
     }
 
     @GetMapping("/{id}/stream")
-    public void streamTrack(@PathVariable("id") Long id, HttpServletResponse response) {
-        trackPlaybackService.redirectToWebDav(id, response);
+    public void streamTrack(@PathVariable("id") Long id,
+                            HttpServletRequest request,
+                            HttpServletResponse response) {
+        try {
+            trackPlaybackService.redirectToProxy(
+                    id,
+                    resolveRequestToken(request),
+                    resolveBackendBaseUrl(request),
+                    response);
+        } catch (BusinessException e) {
+            writeStreamError(response, e);
+        }
     }
 
     @GetMapping("/{id}/stream-proxy")
     public void streamTrackProxy(@PathVariable("id") Long id, HttpServletResponse response) {
-        trackPlaybackService.proxyTrackStream(id, response);
+        try {
+            trackPlaybackService.proxyTrackStream(id, response);
+        } catch (BusinessException e) {
+            writeStreamError(response, e);
+        }
     }
 
     @GetMapping("/{id}/cover")
@@ -76,5 +92,52 @@ public class TrackController {
     public ApiResponse<String> lyric(@PathVariable("id") Long id) {
         String content = trackPlaybackService.getLyricContent(id);
         return ApiResponse.success(content);
+    }
+
+    private String resolveRequestToken(HttpServletRequest request) {
+        String queryToken = request.getParameter("token");
+        if (queryToken != null && !queryToken.trim().isEmpty()) {
+            return queryToken.trim();
+        }
+        String authorization = request.getHeader("Authorization");
+        if (authorization == null) {
+            return null;
+        }
+        String bearer = "Bearer ";
+        if (!authorization.startsWith(bearer)) {
+            return null;
+        }
+        String token = authorization.substring(bearer.length()).trim();
+        return token.isEmpty() ? null : token;
+    }
+
+    private String resolveBackendBaseUrl(HttpServletRequest request) {
+        String scheme = request.getScheme();
+        String serverName = request.getServerName();
+        int serverPort = request.getServerPort();
+        boolean defaultPort = ("http".equalsIgnoreCase(scheme) && serverPort == 80)
+                || ("https".equalsIgnoreCase(scheme) && serverPort == 443);
+        return defaultPort ? (scheme + "://" + serverName) : (scheme + "://" + serverName + ":" + serverPort);
+    }
+
+    private void writeStreamError(HttpServletResponse response, BusinessException e) {
+        try {
+            if (response.isCommitted()) {
+                return;
+            }
+            response.resetBuffer();
+            response.sendError(resolveHttpStatus(e.getCode()), e.getMessage());
+        } catch (Exception ignored) {
+            // ignore secondary write failure
+        }
+    }
+
+    private int resolveHttpStatus(String code) {
+        try {
+            int status = Integer.parseInt(code);
+            return status >= 400 && status <= 599 ? status : HttpServletResponse.SC_INTERNAL_SERVER_ERROR;
+        } catch (Exception ignored) {
+            return HttpServletResponse.SC_INTERNAL_SERVER_ERROR;
+        }
     }
 }

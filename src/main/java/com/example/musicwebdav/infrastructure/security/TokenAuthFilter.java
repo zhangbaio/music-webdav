@@ -73,7 +73,9 @@ public class TokenAuthFilter extends OncePerRequestFilter {
             return authHeader.substring(BEARER_PREFIX.length()).trim();
         }
         String uri = request.getRequestURI();
-        if (uri != null && uri.startsWith("/api/v1/tracks/") && uri.endsWith("/stream")) {
+        if (uri != null
+                && uri.startsWith("/api/v1/tracks/")
+                && (uri.endsWith("/stream") || uri.endsWith("/stream-proxy"))) {
             String tokenInQuery = request.getParameter("token");
             return tokenInQuery == null ? null : tokenInQuery.trim();
         }

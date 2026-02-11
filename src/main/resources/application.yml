@@ -53,6 +53,9 @@ app:
     progress-persist-interval-sec: 30
     metadata-head-bytes: 131072
     metadata-tail-bytes: 128
+    incremental-directory-skip-enabled: true
+    incremental-enable-delete-detection: false
+    incremental-enable-dedup: false
   playlist:
     cleanup-enabled: false
     cleanup-cron: "0 30 4 * * ?"

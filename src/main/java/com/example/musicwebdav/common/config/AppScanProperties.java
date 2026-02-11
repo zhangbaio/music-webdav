@@ -36,6 +36,23 @@ public class AppScanProperties {
 
     private int metadataTailBytes = 128;
 
+    /**
+     * Whether incremental scan can skip unchanged directories by signature (etag/mtime/child count).
+     */
+    private boolean incrementalDirectorySkipEnabled = true;
+
+    /**
+     * Whether incremental scan performs soft-delete detection.
+     * Keep false for performance; use periodic FULL scan to reconcile deletions.
+     */
+    private boolean incrementalEnableDeleteDetection = false;
+
+    /**
+     * Whether incremental scan runs deduplication.
+     * Keep false for performance; run dedup on FULL scan or scheduled maintenance.
+     */
+    private boolean incrementalEnableDedup = false;
+
     public Set<String> normalizedAudioExtensions() {
         return audioExtensions.stream()
                 .filter(item -> item != null && !item.trim().isEmpty())

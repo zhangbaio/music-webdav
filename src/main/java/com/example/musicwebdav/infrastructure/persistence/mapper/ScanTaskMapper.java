@@ -28,6 +28,10 @@ public interface ScanTaskMapper {
     @Select("SELECT status FROM scan_task WHERE id = #{id}")
     String selectStatusById(@Param("id") Long id);
 
+    @Select("SELECT COUNT(1) FROM scan_task "
+            + "WHERE config_id = #{configId} AND status IN ('PENDING','RUNNING')")
+    int countActiveByConfigId(@Param("configId") Long configId);
+
     @Update("UPDATE scan_task SET status = #{status}, start_time = NOW(), updated_at = NOW() "
             + "WHERE id = #{id} AND status = 'PENDING'")
     int markRunning(@Param("id") Long id, @Param("status") String status);
