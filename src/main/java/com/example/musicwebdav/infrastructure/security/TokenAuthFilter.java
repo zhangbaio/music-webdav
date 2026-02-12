@@ -33,7 +33,16 @@ public class TokenAuthFilter extends OncePerRequestFilter {
                 || uri.startsWith("/swagger-ui.html")
                 || uri.startsWith("/music-player.html")
                 || uri.startsWith("/favicon.ico")
-                || uri.startsWith("/error");
+                || uri.startsWith("/error")
+                || isSignedStreamRequest(uri);
+    }
+
+    /**
+     * Signed stream endpoints use HMAC signature for auth, not Bearer token.
+     * Pattern: /api/v1/tracks/{id}/stream-signed
+     */
+    private boolean isSignedStreamRequest(String uri) {
+        return uri != null && uri.contains("/stream-signed");
     }
 
     @Override
