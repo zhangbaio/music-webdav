@@ -24,6 +24,12 @@ management:
     web:
       exposure:
         include: health,info,metrics
+  metrics:
+    distribution:
+      percentiles-histogram:
+        music.search.api.latency: true
+      percentiles:
+        music.search.api.latency: 0.5,0.95,0.99
 
 logging:
   file:
@@ -89,3 +95,8 @@ app:
   webdav:
     connect-timeout-ms: 5000
     socket-timeout-ms: 15000
+  search:
+    slow-query-threshold-ms: 800
+    p95-target-ms: 800
+    cache-ttl-ms: 5000
+    cache-max-entries: 256

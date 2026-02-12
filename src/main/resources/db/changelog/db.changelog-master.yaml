@@ -86,3 +86,13 @@ databaseChangeLog:
             relativeToChangelogFile: false
             splitStatements: true
             stripComments: false
+  - changeSet:
+      id: 20260212-010-search-perf-indexes
+      author: codex
+      validCheckSum: ANY
+      changes:
+        - sqlFile:
+            path: db/changelog/changelog/V10__search_perf_indexes.sql
+            relativeToChangelogFile: false
+            splitStatements: true
+            stripComments: false

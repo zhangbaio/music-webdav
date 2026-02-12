@@ -19,3 +19,10 @@ logging:
   level:
     root: INFO
     com.example.musicwebdav: DEBUG
+
+app:
+  search:
+    slow-query-threshold-ms: 800
+    p95-target-ms: 800
+    cache-ttl-ms: 3000
+    cache-max-entries: 256
