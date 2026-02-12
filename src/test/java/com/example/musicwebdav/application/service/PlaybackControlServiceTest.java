@@ -9,6 +9,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.example.musicwebdav.api.request.PlaybackControlRequest;
+import com.example.musicwebdav.api.request.QueueReorderRequest;
 import com.example.musicwebdav.api.response.NowPlayingStatusResponse;
 import com.example.musicwebdav.common.exception.BusinessException;
 import com.example.musicwebdav.infrastructure.persistence.entity.TrackEntity;
@@ -81,6 +82,32 @@ class PlaybackControlServiceTest {
     }
 
     @Test
+    void shouldReorderQueueAndKeepCurrentTrack() {
+        service.markTrackStarted("u5", 2L);
+
+        NowPlayingStatusResponse reordered = service.reorderQueue("u5", reorderRequest(2, 0, 2L, null, 1L, 2L, 3L));
+        assertEquals(3L, reordered.getQueueTrackIds().get(0).longValue());
+        assertEquals(1L, reordered.getQueueTrackIds().get(1).longValue());
+        assertEquals(2L, reordered.getQueueTrackIds().get(2).longValue());
+        assertEquals(2L, reordered.getCurrentTrackId().longValue());
+        assertTrue(reordered.isHasPrevious());
+        assertFalse(reordered.isHasNext());
+    }
+
+    @Test
+    void shouldRejectQueueReorderWhenVersionConflict() {
+        service.markTrackStarted("u6", 1L);
+        long version = service.getNowPlaying("u6").getUpdatedAtEpochSecond();
+
+        service.reorderQueue("u6", reorderRequest(0, 1, 1L, version, 1L, 2L, 3L));
+        BusinessException conflict = assertThrows(
+                BusinessException.class,
+                () -> service.reorderQueue("u6", reorderRequest(1, 0, 1L, version, 2L, 1L, 3L))
+        );
+        assertEquals("PLAYBACK_QUEUE_CONFLICT", conflict.getCode());
+    }
+
+    @Test
     void shouldReturnReadyWhenNowPlayingNotInitialized() {
         NowPlayingStatusResponse status = service.getNowPlaying("u4");
 
@@ -97,6 +124,21 @@ class PlaybackControlServiceTest {
         request.setCurrentTrackId(currentTrackId);
         request.setProgressSec(progressSec);
         request.setQueueTrackIds(Arrays.asList(queueTrackIds));
+        return request;
+    }
+
+    private QueueReorderRequest reorderRequest(int from,
+                                               int to,
+                                               Long currentTrackId,
+                                               Long expectedVersion,
+                                               Long... queueTrackIds) {
+        QueueReorderRequest request = new QueueReorderRequest();
+        request.setFromIndex(from);
+        request.setToIndex(to);
+        request.setCurrentTrackId(currentTrackId);
+        request.setExpectedUpdatedAtEpochSecond(expectedVersion);
+        request.setQueueTrackIds(Arrays.asList(queueTrackIds));
+        request.setProgressSec(0);
         return request;
     }
 

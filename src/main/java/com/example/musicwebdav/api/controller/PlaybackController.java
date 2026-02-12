@@ -1,6 +1,7 @@
 package com.example.musicwebdav.api.controller;
 
 import com.example.musicwebdav.api.request.PlaybackControlRequest;
+import com.example.musicwebdav.api.request.QueueReorderRequest;
 import com.example.musicwebdav.api.response.ApiResponse;
 import com.example.musicwebdav.api.response.NowPlayingStatusResponse;
 import com.example.musicwebdav.application.service.PlaybackControlService;
@@ -26,6 +27,11 @@ public class PlaybackController {
     @PostMapping("/control")
     public ApiResponse<NowPlayingStatusResponse> control(@Valid @RequestBody PlaybackControlRequest request) {
         return ApiResponse.success(playbackControlService.handleControl(resolveCurrentActor(), request));
+    }
+
+    @PostMapping("/queue/reorder")
+    public ApiResponse<NowPlayingStatusResponse> reorderQueue(@Valid @RequestBody QueueReorderRequest request) {
+        return ApiResponse.success(playbackControlService.reorderQueue(resolveCurrentActor(), request));
     }
 
     @GetMapping("/now-playing")

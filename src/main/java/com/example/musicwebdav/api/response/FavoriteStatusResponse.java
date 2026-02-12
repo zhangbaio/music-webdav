@@ -11,4 +11,6 @@ public class FavoriteStatusResponse {
 
     private Long trackId;
     private Boolean favorite;
+    private Long updatedAtEpochSecond;
+    private Long version;
 }

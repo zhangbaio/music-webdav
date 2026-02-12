@@ -1,6 +1,7 @@
 package com.example.musicwebdav.application.service;
 
 import com.example.musicwebdav.api.request.PlaybackControlRequest;
+import com.example.musicwebdav.api.request.QueueReorderRequest;
 import com.example.musicwebdav.api.response.NowPlayingStatusResponse;
 import com.example.musicwebdav.api.response.NowPlayingTrackResponse;
 import com.example.musicwebdav.common.exception.BusinessException;
@@ -72,6 +73,33 @@ public class PlaybackControlService {
         return toResponse(snapshot, null);
     }
 
+    public NowPlayingStatusResponse reorderQueue(String actor, QueueReorderRequest request) {
+        if (request == null) {
+            throw new BusinessException("400", "请求参数不合法", "请检查输入参数后重试");
+        }
+        String normalizedActor = normalizeActor(actor);
+        long startedAtNanos = System.nanoTime();
+        recordCounter("music.playback.queue.reorder.click");
+        logQueueReorderClick(normalizedActor, request);
+        try {
+            PlaybackStateSnapshot updated = stateByActor.compute(normalizedActor, (key, current) ->
+                    applyQueueReorder(current, request, normalizedActor));
+            recordCounter("music.playback.queue.reorder.result", "outcome", "success");
+            logQueueReorderResult(normalizedActor, "success", null);
+            return toResponse(updated, "queue_reorder");
+        } catch (BusinessException e) {
+            recordCounter("music.playback.queue.reorder.result", "outcome", "failed", "code", safeCode(e.getCode()));
+            logQueueReorderResult(normalizedActor, "failed", safeCode(e.getCode()));
+            throw e;
+        } catch (RuntimeException e) {
+            recordCounter("music.playback.queue.reorder.result", "outcome", "failed", "code", "PLAYBACK_QUEUE_REORDER_FAILED");
+            logQueueReorderResult(normalizedActor, "failed", "PLAYBACK_QUEUE_REORDER_FAILED");
+            throw new BusinessException("PLAYBACK_QUEUE_REORDER_FAILED", "队列重排失败", "请稍后重试");
+        } finally {
+            recordDuration("music.playback.queue.reorder.latency", System.nanoTime() - startedAtNanos);
+        }
+    }
+
     public void markTrackStarted(String actor, Long trackId) {
         if (trackId == null) {
             return;
@@ -97,7 +125,7 @@ public class PlaybackControlService {
             working.currentTrackId = trackId;
             working.progressSec = 0;
             working.state = PlaybackStatus.PLAYING;
-            working.updatedAtEpochSecond = nowEpochSeconds();
+            working.updatedAtEpochSecond = nextUpdatedAtEpochSecond(working.updatedAtEpochSecond);
 
             if (previousTrackId != null && !previousTrackId.equals(trackId)) {
                 logTrackSwitch(normalizedActor, "playback_start", previousTrackId, trackId, 0L);
@@ -133,6 +161,38 @@ public class PlaybackControlService {
         throw new BusinessException("400", "不支持的播放控制命令", "仅支持 pause/resume/previous/next");
     }
 
+    private PlaybackStateSnapshot applyQueueReorder(PlaybackStateSnapshot current,
+                                                    QueueReorderRequest request,
+                                                    String actor) {
+        PlaybackStateSnapshot working = current == null
+                ? PlaybackStateSnapshot.ready()
+                : current.mutableCopy();
+        mergeQueueContext(working, request);
+        ensureQueueAvailable(working.queueTrackIds);
+        ensureValidMoveIndexes(request.getFromIndex(), request.getToIndex(), working.queueTrackIds.size());
+        ensureQueueVersion(current, request.getExpectedUpdatedAtEpochSecond());
+
+        int from = request.getFromIndex();
+        int to = request.getToIndex();
+        if (from == to) {
+            working.updatedAtEpochSecond = nextUpdatedAtEpochSecond(working.updatedAtEpochSecond);
+            return working.freeze();
+        }
+
+        List<Long> reordered = new ArrayList<>(working.queueTrackIds);
+        Long movedTrackId = reordered.remove(from);
+        reordered.add(to, movedTrackId);
+        working.queueTrackIds = reordered;
+
+        if (working.currentTrackId == null || !reordered.contains(working.currentTrackId)) {
+            working.currentTrackId = reordered.get(0);
+        }
+
+        working.updatedAtEpochSecond = nextUpdatedAtEpochSecond(working.updatedAtEpochSecond);
+        logQueueReordered(actor, from, to, reordered.size());
+        return working.freeze();
+    }
+
     private void mergeContext(PlaybackStateSnapshot working, PlaybackControlRequest request) {
         if (request == null) {
             return;
@@ -161,11 +221,32 @@ public class PlaybackControlService {
         }
     }
 
+    private void mergeQueueContext(PlaybackStateSnapshot working, QueueReorderRequest request) {
+        if (request == null) {
+            return;
+        }
+        List<Long> queue = sanitizeQueue(request.getQueueTrackIds());
+        if (!queue.isEmpty()) {
+            working.queueTrackIds = queue;
+        }
+        if (request.getCurrentTrackId() != null) {
+            working.currentTrackId = request.getCurrentTrackId();
+        } else if (working.currentTrackId == null && !working.queueTrackIds.isEmpty()) {
+            working.currentTrackId = working.queueTrackIds.get(0);
+        }
+        if (working.currentTrackId != null && !working.queueTrackIds.contains(working.currentTrackId)) {
+            working.queueTrackIds.add(0, working.currentTrackId);
+        }
+        if (request.getProgressSec() != null) {
+            working.progressSec = normalizeProgress(request.getProgressSec());
+        }
+    }
+
     private PlaybackStateSnapshot applyPause(String actor, PlaybackStateSnapshot working, String command) {
         ensureTrackSelected(working.currentTrackId);
         PlaybackStatus previousState = working.state;
         working.state = PlaybackStatus.PAUSED;
-        working.updatedAtEpochSecond = nowEpochSeconds();
+        working.updatedAtEpochSecond = nextUpdatedAtEpochSecond(working.updatedAtEpochSecond);
         if (previousState != working.state) {
             logStateTransition(actor, previousState, working.state, command);
         }
@@ -177,7 +258,7 @@ public class PlaybackControlService {
         ensureTrackExists(working.currentTrackId);
         PlaybackStatus previousState = working.state;
         working.state = PlaybackStatus.PLAYING;
-        working.updatedAtEpochSecond = nowEpochSeconds();
+        working.updatedAtEpochSecond = nextUpdatedAtEpochSecond(working.updatedAtEpochSecond);
         if (previousState != working.state) {
             logStateTransition(actor, previousState, working.state, command);
         }
@@ -223,7 +304,7 @@ public class PlaybackControlService {
         if (beforePlaying != working.state) {
             logStateTransition(actor, beforePlaying, working.state, command);
         }
-        working.updatedAtEpochSecond = nowEpochSeconds();
+        working.updatedAtEpochSecond = nextUpdatedAtEpochSecond(working.updatedAtEpochSecond);
 
         long switchCostNanos = System.nanoTime() - switchStartNanos;
         recordDuration("music.playback.track.switch.latency", switchCostNanos);
@@ -315,6 +396,30 @@ public class PlaybackControlService {
         }
     }
 
+    private void ensureQueueAvailable(List<Long> queueTrackIds) {
+        if (queueTrackIds == null || queueTrackIds.isEmpty()) {
+            throw new BusinessException("PLAYBACK_QUEUE_EMPTY", "当前队列为空", "请先添加待播放歌曲");
+        }
+    }
+
+    private void ensureValidMoveIndexes(Integer fromIndex, Integer toIndex, int size) {
+        if (fromIndex == null || toIndex == null) {
+            throw new BusinessException("400", "重排参数不合法", "请重试队列重排");
+        }
+        if (fromIndex < 0 || toIndex < 0 || fromIndex >= size || toIndex >= size) {
+            throw new BusinessException("PLAYBACK_QUEUE_OUT_OF_RANGE", "重排索引越界", "请刷新队列后重试");
+        }
+    }
+
+    private void ensureQueueVersion(PlaybackStateSnapshot current, Long expectedUpdatedAtEpochSecond) {
+        if (expectedUpdatedAtEpochSecond == null || current == null) {
+            return;
+        }
+        if (current.updatedAtEpochSecond != expectedUpdatedAtEpochSecond.longValue()) {
+            throw new BusinessException("PLAYBACK_QUEUE_CONFLICT", "队列已被其他操作更新", "请刷新队列后重试");
+        }
+    }
+
     private String normalizeActor(String actor) {
         if (!StringUtils.hasText(actor)) {
             return "anonymous";
@@ -336,6 +441,11 @@ public class PlaybackControlService {
         return System.currentTimeMillis() / 1000L;
     }
 
+    private long nextUpdatedAtEpochSecond(long previous) {
+        long now = nowEpochSeconds();
+        return Math.max(now, previous + 1L);
+    }
+
     private void logControlClick(String actor, String command, PlaybackControlRequest request) {
         int queueSize = request == null || request.getQueueTrackIds() == null ? 0 : request.getQueueTrackIds().size();
         log.info("PLAYBACK_EVENT event=control_click actor={} command={} currentTrackId={} queueSize={} traceId={}",
@@ -354,6 +464,32 @@ public class PlaybackControlService {
         }
         log.info("PLAYBACK_EVENT event=control_result actor={} command={} outcome={} traceId={}",
                 actor, command, outcome, currentTraceId());
+    }
+
+    private void logQueueReorderClick(String actor, QueueReorderRequest request) {
+        int queueSize = request == null || request.getQueueTrackIds() == null ? 0 : request.getQueueTrackIds().size();
+        log.info("PLAYBACK_EVENT event=queue_reorder_click actor={} fromIndex={} toIndex={} queueSize={} expectedVersion={} traceId={}",
+                actor,
+                request == null ? null : request.getFromIndex(),
+                request == null ? null : request.getToIndex(),
+                queueSize,
+                request == null ? null : request.getExpectedUpdatedAtEpochSecond(),
+                currentTraceId());
+    }
+
+    private void logQueueReorderResult(String actor, String outcome, String reasonCode) {
+        if (StringUtils.hasText(reasonCode)) {
+            log.warn("PLAYBACK_EVENT event=queue_reorder_result actor={} outcome={} code={} traceId={}",
+                    actor, outcome, reasonCode, currentTraceId());
+            return;
+        }
+        log.info("PLAYBACK_EVENT event=queue_reorder_result actor={} outcome={} traceId={}",
+                actor, outcome, currentTraceId());
+    }
+
+    private void logQueueReordered(String actor, int from, int to, int queueSize) {
+        log.info("PLAYBACK_EVENT event=queue_reordered actor={} fromIndex={} toIndex={} queueSize={} traceId={}",
+                actor, from, to, queueSize, currentTraceId());
     }
 
     private void logTrackSwitch(String actor,
