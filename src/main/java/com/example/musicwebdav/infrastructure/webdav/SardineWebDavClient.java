@@ -15,6 +15,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.RandomAccessFile;
 import java.net.URI;
+import java.net.SocketTimeoutException;
 import java.net.URISyntaxException;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
@@ -26,6 +27,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import javax.net.ssl.SSLException;
 import org.apache.http.Header;
 import org.apache.http.HttpResponse;
 import org.apache.http.HttpStatus;
@@ -42,25 +44,44 @@ public class SardineWebDavClient implements WebDavClient {
 
     @Override
     public WebDavConnectResult testConnection(String baseUrl, String username, String password, String rootPath) {
-        long start = System.currentTimeMillis();
         String targetUrl;
         try {
             targetUrl = buildTargetUrl(baseUrl, rootPath);
         } catch (IllegalArgumentException e) {
-            return new WebDavConnectResult(false, e.getMessage());
+            return WebDavConnectResult.failure(
+                    "WEBDAV_INVALID_BASE_URL",
+                    e.getMessage(),
+                    "请检查 WebDAV 地址后重试",
+                    "UNREACHABLE");
         }
         Sardine sardine = SardineFactory.begin(username, password);
         try {
-            List<DavResource> resources = sardine.list(ensureDirectoryUrl(targetUrl), 1);
-            long cost = System.currentTimeMillis() - start;
-            return new WebDavConnectResult(true, "连接成功，目录可访问，耗时 " + cost + " ms，返回资源数 " + resources.size());
+            sardine.list(ensureDirectoryUrl(targetUrl), 0);
+            return WebDavConnectResult.success("连接成功，目录可访问");
         } catch (SardineException e) {
-            String message = mapSardineException(e);
             log.warn("WebDAV test failed, status={}, url={}", e.getStatusCode(), targetUrl);
-            return new WebDavConnectResult(false, message);
+            return mapTestConnectionSardineFailure(e);
+        } catch (SocketTimeoutException e) {
+            log.warn("WebDAV test timeout, url={}", targetUrl);
+            return WebDavConnectResult.failure(
+                    "WEBDAV_TIMEOUT",
+                    "WebDAV连接超时",
+                    "请稍后重试；若持续超时请联系管理员检查网络",
+                    "UNREACHABLE");
+        } catch (SSLException e) {
+            log.warn("WebDAV test TLS failure, url={}", targetUrl);
+            return WebDavConnectResult.failure(
+                    "WEBDAV_TLS_FAILED",
+                    "WebDAV TLS 握手失败",
+                    "请联系管理员检查证书配置",
+                    "UNREACHABLE");
         } catch (IOException e) {
             log.warn("WebDAV test IO error, url={}", targetUrl, e);
-            return new WebDavConnectResult(false, "WebDAV网络异常：" + e.getMessage());
+            return WebDavConnectResult.failure(
+                    "WEBDAV_NETWORK_ERROR",
+                    "WebDAV网络异常：" + e.getMessage(),
+                    "请检查网络后重试；若持续失败请联系管理员",
+                    "UNREACHABLE");
         } finally {
             shutdownSafely(sardine);
         }
@@ -498,6 +519,43 @@ public class SardineWebDavClient implements WebDavClient {
             return "WebDAV服务端异常，状态码：" + status;
         }
         return "WebDAV请求失败，状态码：" + status;
+    }
+
+    private WebDavConnectResult mapTestConnectionSardineFailure(SardineException e) {
+        int status = e.getStatusCode();
+        if (status == 401) {
+            return WebDavConnectResult.failure(
+                    "WEBDAV_AUTH_FAILED",
+                    "WebDAV鉴权失败",
+                    "请联系管理员检查用户名或密码",
+                    "NO_PERMISSION");
+        }
+        if (status == 403) {
+            return WebDavConnectResult.failure(
+                    "WEBDAV_PERMISSION_DENIED",
+                    "WebDAV目录无访问权限",
+                    "请联系管理员检查目录权限",
+                    "NO_PERMISSION");
+        }
+        if (status == 404) {
+            return WebDavConnectResult.failure(
+                    "WEBDAV_PATH_NOT_FOUND",
+                    "WebDAV目录不存在",
+                    "请联系管理员检查根目录配置",
+                    "PATH_NOT_FOUND");
+        }
+        if (status >= 500) {
+            return WebDavConnectResult.failure(
+                    "WEBDAV_SERVER_ERROR",
+                    "WebDAV服务端异常，状态码：" + status,
+                    "请稍后重试；若持续失败请联系管理员",
+                    "UNREACHABLE");
+        }
+        return WebDavConnectResult.failure(
+                "WEBDAV_REQUEST_FAILED",
+                "WebDAV请求失败，状态码：" + status,
+                "请稍后重试",
+                "UNREACHABLE");
     }
 
     private String guessSuffix(String fileUrl) {

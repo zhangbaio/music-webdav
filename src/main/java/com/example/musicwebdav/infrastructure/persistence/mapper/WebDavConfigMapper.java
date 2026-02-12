@@ -27,4 +27,8 @@ public interface WebDavConfigMapper {
     @Select("SELECT id, name, base_url, username, password_enc, root_path, enabled, created_at, updated_at "
             + "FROM webdav_config WHERE enabled = 1 ORDER BY id ASC")
     List<WebDavConfigEntity> selectEnabled();
+
+    @Select("SELECT id, name, base_url, username, password_enc, root_path, enabled, created_at, updated_at "
+            + "FROM webdav_config WHERE enabled = 1 ORDER BY id ASC LIMIT 1")
+    WebDavConfigEntity selectFirstEnabled();
 }

@@ -18,7 +18,7 @@ public class CreateWebDavConfigRequest {
     @NotBlank
     private String password;
 
-    @NotBlank
+    /** Optional root path. Empty value means '/' on backend side. */
     private String rootPath;
 
     private Boolean enabled = true;

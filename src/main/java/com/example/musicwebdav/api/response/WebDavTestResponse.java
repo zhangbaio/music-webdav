@@ -9,7 +9,10 @@ import lombok.NoArgsConstructor;
 @AllArgsConstructor
 public class WebDavTestResponse {
 
-    private boolean success;
-    private String message;
+    private String status;
+    private String directoryAccess;
     private long latencyMs;
+    private String code;
+    private String message;
+    private String userAction;
 }

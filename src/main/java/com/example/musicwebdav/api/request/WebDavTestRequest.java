@@ -15,6 +15,6 @@ public class WebDavTestRequest {
     @NotBlank
     private String password;
 
-    @NotBlank
+    /** Optional root path. Empty value means '/' on backend side. */
     private String rootPath;
 }

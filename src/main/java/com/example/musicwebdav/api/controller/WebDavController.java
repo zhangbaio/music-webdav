@@ -33,6 +33,12 @@ public class WebDavController {
         return ApiResponse.success(webDavConnectionService.testConnection(request));
     }
 
+    @PostMapping("/configs/test")
+    public ApiResponse<WebDavTestResponse> testSavedConnection(
+            @RequestParam(value = "id", required = false) Long configId) {
+        return ApiResponse.success(webDavConnectionService.testSavedConnection(configId));
+    }
+
     @PostMapping("/configs")
     public ApiResponse<WebDavConfigResponse> createConfig(@Valid @RequestBody CreateWebDavConfigRequest request) {
         return ApiResponse.success(webDavConnectionService.createConfig(request));
