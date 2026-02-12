@@ -37,6 +37,7 @@ public class TrackPlaybackService {
     private final WebDavClient webDavClient;
     private final AppSecurityProperties appSecurityProperties;
     private final PlaybackTokenService playbackTokenService;
+    private final PlaybackControlService playbackControlService;
     private final AppPlaybackProperties appPlaybackProperties;
     private final MeterRegistry meterRegistry;
 
@@ -45,6 +46,7 @@ public class TrackPlaybackService {
                                 WebDavClient webDavClient,
                                 AppSecurityProperties appSecurityProperties,
                                 PlaybackTokenService playbackTokenService,
+                                PlaybackControlService playbackControlService,
                                 AppPlaybackProperties appPlaybackProperties,
                                 ObjectProvider<MeterRegistry> meterRegistryProvider) {
         this.trackMapper = trackMapper;
@@ -52,6 +54,7 @@ public class TrackPlaybackService {
         this.webDavClient = webDavClient;
         this.appSecurityProperties = appSecurityProperties;
         this.playbackTokenService = playbackTokenService;
+        this.playbackControlService = playbackControlService;
         this.appPlaybackProperties = appPlaybackProperties;
         this.meterRegistry = meterRegistryProvider.getIfAvailable();
     }
@@ -65,6 +68,12 @@ public class TrackPlaybackService {
             }
             PlaybackTokenService.PlaybackTokenIssue tokenIssue =
                     playbackTokenService.issueTrackStreamToken(actor, trackId);
+            try {
+                playbackControlService.markTrackStarted(actor, trackId);
+            } catch (Exception ex) {
+                log.warn("PLAYBACK_STATE_INIT_FAILED actor={} trackId={} traceId={}",
+                        safeActor(actor), trackId, currentTraceId(), ex);
+            }
             String signedPath = "/api/v1/tracks/" + trackId + "/stream?playbackToken="
                     + UriUtils.encodeQueryParam(tokenIssue.getToken(), StandardCharsets.UTF_8.name());
 

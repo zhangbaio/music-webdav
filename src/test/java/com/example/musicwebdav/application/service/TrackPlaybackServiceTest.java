@@ -3,6 +3,7 @@ package com.example.musicwebdav.application.service;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.example.musicwebdav.api.response.PlaybackSessionResponse;
@@ -26,6 +27,7 @@ class TrackPlaybackServiceTest {
         WebDavConfigMapper webDavConfigMapper = mock(WebDavConfigMapper.class);
         WebDavClient webDavClient = mock(WebDavClient.class);
         PlaybackTokenService playbackTokenService = mock(PlaybackTokenService.class);
+        PlaybackControlService playbackControlService = mock(PlaybackControlService.class);
 
         TrackEntity track = new TrackEntity();
         track.setId(21L);
@@ -45,6 +47,7 @@ class TrackPlaybackServiceTest {
                 webDavClient,
                 securityProperties,
                 playbackTokenService,
+                playbackControlService,
                 playbackProperties,
                 beanProvider(meterRegistry)
         );
@@ -54,6 +57,7 @@ class TrackPlaybackServiceTest {
         assertEquals(21L, response.getTrackId().longValue());
         assertTrue(response.getSignedStreamPath().contains("/api/v1/tracks/21/stream?playbackToken="));
         assertEquals(8L, response.getRefreshBeforeExpirySeconds().longValue());
+        verify(playbackControlService).markTrackStarted("demo-user", 21L);
         assertEquals(1.0D, meterRegistry.find("music.playback.sign.success").counter().count());
         assertTrue(meterRegistry.find("music.playback.sign.latency").timer().count() >= 1);
     }
