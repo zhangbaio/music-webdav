@@ -6,7 +6,6 @@ import com.example.musicwebdav.api.response.PageResponse;
 import com.example.musicwebdav.api.response.TrackDetailResponse;
 import com.example.musicwebdav.api.response.TrackResponse;
 import com.example.musicwebdav.common.exception.BusinessException;
-import com.example.musicwebdav.application.service.PlaybackSessionService;
 import com.example.musicwebdav.application.service.TrackPlaybackService;
 import com.example.musicwebdav.application.service.TrackQueryService;
 import java.util.List;
@@ -26,14 +25,11 @@ public class TrackController {
 
     private final TrackQueryService trackQueryService;
     private final TrackPlaybackService trackPlaybackService;
-    private final PlaybackSessionService playbackSessionService;
 
     public TrackController(TrackQueryService trackQueryService,
-                           TrackPlaybackService trackPlaybackService,
-                           PlaybackSessionService playbackSessionService) {
+                           TrackPlaybackService trackPlaybackService) {
         this.trackQueryService = trackQueryService;
         this.trackPlaybackService = trackPlaybackService;
-        this.playbackSessionService = playbackSessionService;
     }
 
     @GetMapping
@@ -106,16 +102,6 @@ public class TrackController {
         } catch (BusinessException e) {
             writeStreamError(response, e);
         }
-    }
-
-    /**
-     * Get a signed playback session for a track.
-     * Returns a time-limited signed URL that can be used directly by the audio player.
-     */
-    @GetMapping("/{id}/playback-session")
-    public ApiResponse<PlaybackSessionService.PlaybackSessionGrant> playbackSession(
-            @PathVariable("id") Long id) {
-        return ApiResponse.success(playbackSessionService.createSession(id));
     }
 
     /**
