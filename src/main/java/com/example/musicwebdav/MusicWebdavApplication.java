@@ -1,5 +1,6 @@
 package com.example.musicwebdav;
 
+import com.example.musicwebdav.common.config.AppAuthProperties;
 import com.example.musicwebdav.common.config.AppPlaylistProperties;
 import com.example.musicwebdav.common.config.AppSecurityProperties;
 import com.example.musicwebdav.common.config.AppScanProperties;
@@ -14,6 +15,7 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 @MapperScan("com.example.musicwebdav.infrastructure.persistence.mapper")
 @EnableScheduling
 @EnableConfigurationProperties({
+        AppAuthProperties.class,
         AppSecurityProperties.class,
         AppWebDavProperties.class,
         AppScanProperties.class,

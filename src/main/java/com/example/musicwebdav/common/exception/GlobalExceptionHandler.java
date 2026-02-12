@@ -17,22 +17,22 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(BusinessException.class)
     public ApiResponse<Void> handleBusinessException(BusinessException e) {
-        return ApiResponse.fail(e.getCode(), e.getMessage());
+        return ApiResponse.fail(e.getCode(), e.getMessage(), e.getUserAction());
     }
 
     @ExceptionHandler({MethodArgumentNotValidException.class, BindException.class, ConstraintViolationException.class})
     public ApiResponse<Void> handleValidationException(Exception e) {
-        return ApiResponse.fail("400", "请求参数不合法");
+        return ApiResponse.fail("400", "请求参数不合法", "请检查输入参数后重试");
     }
 
     @ExceptionHandler(DuplicateKeyException.class)
     public ApiResponse<Void> handleDuplicateKeyException(DuplicateKeyException e) {
-        return ApiResponse.fail("409", "数据重复，请检查唯一约束");
+        return ApiResponse.fail("409", "数据重复，请检查唯一约束", "请调整输入后重试");
     }
 
     @ExceptionHandler(Exception.class)
     public ApiResponse<Void> handleException(Exception e) {
         log.error("Unhandled exception", e);
-        return ApiResponse.fail("500", "系统内部错误");
+        return ApiResponse.fail("500", "系统内部错误", "请稍后重试");
     }
 }

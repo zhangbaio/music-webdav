@@ -1,5 +1,6 @@
 package com.example.musicwebdav.common.config;
 
+import com.example.musicwebdav.application.service.AuthTokenService;
 import com.example.musicwebdav.common.logging.AccessLogFilter;
 import com.example.musicwebdav.infrastructure.security.TokenAuthFilter;
 import org.springframework.context.annotation.Bean;
@@ -20,8 +21,9 @@ public class SecurityConfig {
     }
 
     @Bean
-    public TokenAuthFilter tokenAuthFilter(AppSecurityProperties properties) {
-        return new TokenAuthFilter(properties);
+    public TokenAuthFilter tokenAuthFilter(AppSecurityProperties properties,
+                                           AuthTokenService authTokenService) {
+        return new TokenAuthFilter(properties, authTokenService);
     }
 
     @Bean
@@ -40,7 +42,8 @@ public class SecurityConfig {
                         "/swagger-ui.html",
                         "/music-player.html",
                         "/webdav-manager.html",
-                        "/favicon.ico")
+                        "/favicon.ico",
+                        "/api/v1/auth/**")
                 .permitAll()
                 .anyRequest().authenticated()
                 .and()

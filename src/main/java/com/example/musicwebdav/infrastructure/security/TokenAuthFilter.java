@@ -1,6 +1,10 @@
 package com.example.musicwebdav.infrastructure.security;
 
+import com.example.musicwebdav.api.response.ApiResponse;
+import com.example.musicwebdav.application.service.AuthTokenService;
 import com.example.musicwebdav.common.config.AppSecurityProperties;
+import com.example.musicwebdav.common.exception.BusinessException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
@@ -18,9 +22,14 @@ public class TokenAuthFilter extends OncePerRequestFilter {
     private static final String BEARER_PREFIX = "Bearer ";
 
     private final AppSecurityProperties properties;
+    private final AuthTokenService authTokenService;
+    private final ObjectMapper objectMapper;
 
-    public TokenAuthFilter(AppSecurityProperties properties) {
+    public TokenAuthFilter(AppSecurityProperties properties,
+                           AuthTokenService authTokenService) {
         this.properties = properties;
+        this.authTokenService = authTokenService;
+        this.objectMapper = new ObjectMapper();
     }
 
     @Override
@@ -33,38 +42,46 @@ public class TokenAuthFilter extends OncePerRequestFilter {
                 || uri.startsWith("/swagger-ui.html")
                 || uri.startsWith("/music-player.html")
                 || uri.startsWith("/favicon.ico")
-                || uri.startsWith("/error");
+                || uri.startsWith("/error")
+                || uri.startsWith("/api/v1/auth/");
     }
 
     @Override
     protected void doFilterInternal(HttpServletRequest request,
                                     HttpServletResponse response,
                                     FilterChain filterChain) throws ServletException, IOException {
-        String configuredToken = properties.getApiToken();
         String requestToken = extractRequestToken(request);
-
-        if (configuredToken == null || configuredToken.trim().isEmpty()) {
-            unauthorized(response, "API token is not configured");
-            return;
-        }
-
         if (requestToken == null || requestToken.isEmpty()) {
-            unauthorized(response, "Missing Bearer token");
+            unauthorized(response, "AUTH_MISSING_TOKEN", "缺少 Bearer token", "请先登录");
             return;
         }
 
-        if (!configuredToken.equals(requestToken)) {
-            unauthorized(response, "Invalid token");
+        String configuredApiToken = properties.getApiToken();
+        if (configuredApiToken != null
+                && !configuredApiToken.trim().isEmpty()
+                && configuredApiToken.equals(requestToken)) {
+            UsernamePasswordAuthenticationToken authentication =
+                    new UsernamePasswordAuthenticationToken(
+                            "api-client",
+                            null,
+                            Collections.singletonList(new SimpleGrantedAuthority("ROLE_API")));
+            SecurityContextHolder.getContext().setAuthentication(authentication);
+            filterChain.doFilter(request, response);
             return;
         }
 
-        UsernamePasswordAuthenticationToken authentication =
-                new UsernamePasswordAuthenticationToken(
-                        "api-client",
-                        null,
-                        Collections.singletonList(new SimpleGrantedAuthority("ROLE_API")));
-        SecurityContextHolder.getContext().setAuthentication(authentication);
-        filterChain.doFilter(request, response);
+        try {
+            String subject = authTokenService.verifyAccessTokenAndGetSubject(requestToken);
+            UsernamePasswordAuthenticationToken authentication =
+                    new UsernamePasswordAuthenticationToken(
+                            subject,
+                            null,
+                            Collections.singletonList(new SimpleGrantedAuthority("ROLE_USER")));
+            SecurityContextHolder.getContext().setAuthentication(authentication);
+            filterChain.doFilter(request, response);
+        } catch (BusinessException e) {
+            unauthorized(response, e.getCode(), e.getMessage(), e.getUserAction());
+        }
     }
 
     private String extractRequestToken(HttpServletRequest request) {
@@ -82,10 +99,14 @@ public class TokenAuthFilter extends OncePerRequestFilter {
         return null;
     }
 
-    private void unauthorized(HttpServletResponse response, String message) throws IOException {
+    private void unauthorized(HttpServletResponse response,
+                              String code,
+                              String message,
+                              String userAction) throws IOException {
         response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
         response.setCharacterEncoding(StandardCharsets.UTF_8.name());
         response.setContentType("application/json;charset=UTF-8");
-        response.getWriter().write("{\"code\":\"401\",\"message\":\"" + message + "\",\"data\":null}");
+        ApiResponse<Void> body = ApiResponse.fail(code, message, userAction);
+        response.getWriter().write(objectMapper.writeValueAsString(body));
     }
 }

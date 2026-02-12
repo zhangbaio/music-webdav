@@ -74,6 +74,15 @@ app:
   security:
     api-token: dev-token
     encrypt-key: changeit12345678
+  auth:
+    username: demo
+    password: demo123
+    issuer: music-webdav
+    audience: applemusic-mobile
+    jwt-secret: changeit-music-webdav-jwt-secret
+    access-token-ttl-seconds: 900
+    refresh-token-ttl-seconds: 2592000
+    refresh-token-rotate: true
   webdav:
     connect-timeout-ms: 5000
     socket-timeout-ms: 15000
