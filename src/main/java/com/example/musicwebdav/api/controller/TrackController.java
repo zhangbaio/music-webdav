@@ -6,6 +6,7 @@ import com.example.musicwebdav.api.response.PageResponse;
 import com.example.musicwebdav.api.response.TrackDetailResponse;
 import com.example.musicwebdav.api.response.TrackResponse;
 import com.example.musicwebdav.common.exception.BusinessException;
+import com.example.musicwebdav.application.service.PlaybackSessionService;
 import com.example.musicwebdav.application.service.TrackPlaybackService;
 import com.example.musicwebdav.application.service.TrackQueryService;
 import java.util.List;
@@ -25,10 +26,14 @@ public class TrackController {
 
     private final TrackQueryService trackQueryService;
     private final TrackPlaybackService trackPlaybackService;
+    private final PlaybackSessionService playbackSessionService;
 
-    public TrackController(TrackQueryService trackQueryService, TrackPlaybackService trackPlaybackService) {
+    public TrackController(TrackQueryService trackQueryService,
+                           TrackPlaybackService trackPlaybackService,
+                           PlaybackSessionService playbackSessionService) {
         this.trackQueryService = trackQueryService;
         this.trackPlaybackService = trackPlaybackService;
+        this.playbackSessionService = playbackSessionService;
     }
 
     @GetMapping
@@ -98,6 +103,34 @@ public class TrackController {
     public void streamTrackProxy(@PathVariable("id") Long id, HttpServletResponse response) {
         try {
             trackPlaybackService.proxyTrackStream(id, response);
+        } catch (BusinessException e) {
+            writeStreamError(response, e);
+        }
+    }
+
+    /**
+     * Get a signed playback session for a track.
+     * Returns a time-limited signed URL that can be used directly by the audio player.
+     */
+    @GetMapping("/{id}/playback-session")
+    public ApiResponse<PlaybackSessionService.PlaybackSessionGrant> playbackSession(
+            @PathVariable("id") Long id) {
+        return ApiResponse.success(playbackSessionService.createSession(id));
+    }
+
+    /**
+     * Signed stream endpoint — authenticated via HMAC signature in query params (no Bearer token needed).
+     * Supports HTTP Range requests for seeking.
+     */
+    @GetMapping("/{id}/stream-signed")
+    public void streamSigned(@PathVariable("id") Long id,
+                             @RequestParam("expire") long expire,
+                             @RequestParam("sign") String sign,
+                             HttpServletRequest request,
+                             HttpServletResponse response) {
+        try {
+            trackPlaybackService.proxyTrackStreamSigned(id, expire, sign,
+                    request.getHeader("Range"), response);
         } catch (BusinessException e) {
             writeStreamError(response, e);
         }

@@ -83,6 +83,8 @@ app:
   security:
     api-token: dev-token
     encrypt-key: changeit12345678
+    playback-sign-key: change-me-playback-sign-key-32b
+    playback-sign-ttl-sec: 3600
   auth:
     username: demo
     password: demo123

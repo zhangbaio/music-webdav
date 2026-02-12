@@ -5,6 +5,7 @@ import com.example.musicwebdav.common.config.AppPlaybackProperties;
 import com.example.musicwebdav.common.config.AppSecurityProperties;
 import com.example.musicwebdav.common.exception.BusinessException;
 import com.example.musicwebdav.common.util.AesCryptoUtil;
+import com.example.musicwebdav.common.util.PlaybackSignUtil;
 import com.example.musicwebdav.infrastructure.persistence.entity.TrackEntity;
 import com.example.musicwebdav.infrastructure.persistence.entity.WebDavConfigEntity;
 import com.example.musicwebdav.infrastructure.persistence.mapper.TrackMapper;
@@ -13,12 +14,20 @@ import com.example.musicwebdav.infrastructure.webdav.WebDavClient;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 import javax.servlet.http.HttpServletResponse;
+import org.apache.http.Header;
+import org.apache.http.HttpResponse;
+import org.apache.http.client.HttpClient;
+import org.apache.http.client.methods.HttpGet;
+import org.apache.http.impl.client.HttpClients;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
@@ -161,6 +170,100 @@ public class TrackPlaybackService {
             log.error("PLAYBACK_STREAM_PROXY_FAILED trackId={} sourcePathHash={} traceId={}",
                     trackId, summarizePath(track.getSourcePath()), currentTraceId(), e);
             throw new BusinessException("500", "音频流读取失败：" + e.getMessage());
+        }
+    }
+
+    /**
+     * Signed stream endpoint with Range support.
+     * Verifies HMAC signature, then proxies the audio from WebDAV with full
+     * HTTP Range support (for seeking / progress bar). No Bearer token needed.
+     */
+    public void proxyTrackStreamSigned(Long trackId, long expire, String signature,
+                                       String rangeHeader, HttpServletResponse response) {
+        // 1. Verify signature
+        if (!PlaybackSignUtil.verify(appSecurityProperties.getPlaybackSignKey(),
+                trackId, expire, signature)) {
+            throw new BusinessException("403", "签名无效或已过期");
+        }
+
+        // 2. Load track & config
+        TrackEntity track = trackMapper.selectById(trackId);
+        if (track == null || (track.getIsDeleted() != null && track.getIsDeleted() == 1)) {
+            throw new BusinessException("404", "歌曲不存在");
+        }
+        if (track.getSourceConfigId() == null) {
+            throw new BusinessException("500", "歌曲来源配置缺失");
+        }
+
+        WebDavConfigEntity config = webDavConfigMapper.selectById(track.getSourceConfigId());
+        if (config == null) {
+            throw new BusinessException("404", "歌曲来源配置不存在");
+        }
+
+        String streamUrl = buildFileUrl(config, track.getSourcePath());
+        String decryptedPassword = AesCryptoUtil.decrypt(
+                config.getPasswordEnc(), appSecurityProperties.getEncryptKey());
+
+        // 3. Build WebDAV GET request with Basic Auth and optional Range
+        HttpGet httpGet = new HttpGet(streamUrl);
+        String basicAuth = Base64.getEncoder().encodeToString(
+                (config.getUsername() + ":" + decryptedPassword).getBytes(StandardCharsets.UTF_8));
+        httpGet.setHeader("Authorization", "Basic " + basicAuth);
+
+        if (StringUtils.hasText(rangeHeader)) {
+            httpGet.setHeader("Range", rangeHeader);
+        }
+
+        // 4. Execute and stream-forward response
+        HttpClient httpClient = HttpClients.createDefault();
+        try {
+            HttpResponse webDavResponse = httpClient.execute(httpGet);
+            int statusCode = webDavResponse.getStatusLine().getStatusCode();
+
+            if (statusCode >= 400) {
+                log.error("WebDAV returned error status={} for trackId={}, url={}", statusCode, trackId, streamUrl);
+                throw new BusinessException(String.valueOf(statusCode), "WebDAV 音频请求失败，状态码: " + statusCode);
+            }
+
+            // Forward status: 200 (full) or 206 (partial)
+            response.setStatus(statusCode);
+
+            // Forward content type
+            String mimeType = StringUtils.hasText(track.getMimeType())
+                    ? track.getMimeType().trim().toLowerCase(Locale.ROOT)
+                    : "application/octet-stream";
+            response.setContentType(mimeType);
+
+            // Forward essential headers from WebDAV response
+            copyHeaderIfPresent(webDavResponse, response, "Content-Length");
+            copyHeaderIfPresent(webDavResponse, response, "Content-Range");
+            response.setHeader("Accept-Ranges", "bytes");
+            response.setHeader("Cache-Control", "no-store");
+
+            // 5. Stream-forward bytes (8KB buffer, no full buffering)
+            try (InputStream in = webDavResponse.getEntity().getContent();
+                 OutputStream out = response.getOutputStream()) {
+                byte[] buffer = new byte[8192];
+                int len;
+                while ((len = in.read(buffer)) != -1) {
+                    out.write(buffer, 0, len);
+                }
+                out.flush();
+            }
+        } catch (IOException e) {
+            if (isClientAbort(e)) {
+                log.warn("Client aborted signed stream, trackId={}", trackId);
+                return;
+            }
+            log.error("Failed to proxy signed stream for trackId={}, url={}", trackId, streamUrl, e);
+            throw new BusinessException("500", "签名音频流读取失败：" + e.getMessage());
+        }
+    }
+
+    private void copyHeaderIfPresent(HttpResponse source, HttpServletResponse target, String headerName) {
+        Header header = source.getFirstHeader(headerName);
+        if (header != null) {
+            target.setHeader(headerName, header.getValue());
         }
     }
 
