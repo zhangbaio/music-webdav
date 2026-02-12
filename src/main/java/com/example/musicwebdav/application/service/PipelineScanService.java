@@ -108,7 +108,9 @@ public class PipelineScanService {
             throw new IllegalStateException("app.scan.audio-extensions 配置为空");
         }
 
-        ScanProgressTracker tracker = new ScanProgressTracker(30, appScanProperties.getProgressPersistIntervalSec());
+        ScanProgressTracker tracker = new ScanProgressTracker(30,
+                appScanProperties.getProgressPersistIntervalSec(),
+                appScanProperties.getLargeDirWarnThreshold());
         String rootUrl = webDavClient.buildRootUrl(config.getBaseUrl(), config.getRootPath());
 
         log.info("PIPELINE_SCAN_START taskId={} configId={} configName={} rootUrl={}",
@@ -138,11 +140,22 @@ public class PipelineScanService {
                 appScanProperties.getDirectoryProcessMaxInFlight());
         final ScanTelemetry telemetry = new ScanTelemetry(taskId, config.getId(), taskType.name());
 
-        log.info("PIPELINE_SCAN_SWITCHES taskId={} taskType={} directorySkip={} deleteDetection={} dedup={} seenDelete={}",
-                taskId, taskType.name(), directorySkipEnabled, deleteDetectionEnabled, dedupEnabled, useSeenBasedDelete);
-        log.info("PIPELINE_SCAN_PARALLEL taskId={} listWorkers={} listMaxInFlight={} processWorkers={} processMaxInFlight={}",
+        // When not using seen-based delete, defer per-directory touch operations to post-scan.
+        // Instead of running LIKE-based UPDATE per skipped directory (O(dirs * tracks)),
+        // we do a single config-wide touch at the end (O(tracks)).
+        final boolean deferTouchToPostScan = deleteDetectionEnabled && !useSeenBasedDelete;
+
+        log.info("PIPELINE_SCAN_SWITCHES taskId={} taskType={} directorySkip={} deleteDetection={} dedup={} "
+                        + "seenDelete={} deferTouch={}",
+                taskId, taskType.name(), directorySkipEnabled, deleteDetectionEnabled, dedupEnabled,
+                useSeenBasedDelete, deferTouchToPostScan);
+        final int smallDirMergeThreshold = Math.max(0, appScanProperties.getSmallDirMergeThreshold());
+        log.info("PIPELINE_SCAN_PARALLEL taskId={} listWorkers={} listMaxInFlight={} processWorkers={} processMaxInFlight={} "
+                        + "dbBatchSize={} smallDirMerge={} largeDirWarn={}",
                 taskId, directoryListThreadCount, directoryListMaxInFlight,
-                directoryProcessThreadCount, directoryProcessMaxInFlight);
+                directoryProcessThreadCount, directoryProcessMaxInFlight,
+                appScanProperties.getDbBatchSize(), smallDirMergeThreshold,
+                appScanProperties.getLargeDirWarnThreshold());
         incrementCounter("music.scan.task.started", 1, "task_type", taskType.name());
 
         String metricStatus = "SUCCESS";
@@ -165,6 +178,11 @@ public class PipelineScanService {
             dirQueue.push(rootUrl);
             scheduled.add(normalizeUrl(rootUrl));
             tracker.addDiscoveredDirectories(1);
+
+            // Small-directory merge batch: accumulates small dirs to submit as a single process task
+            List<SmallDirEntry> smallDirBatch = new ArrayList<>();
+            int smallDirBatchFileCount = 0;
+            int dbBatchSize = Math.max(10, appScanProperties.getDbBatchSize());
 
             while (!dirQueue.isEmpty() || listInFlight > 0) {
                 if (cancelSignal != null && cancelSignal.getAsBoolean()) {
@@ -221,7 +239,7 @@ public class PipelineScanService {
                 // Check resume checkpoint
                 if (resumedCheckpoints != null && resumedCheckpoints.contains(dirPathMd5)) {
                     markSkippedDirectory(taskId, config.getId(), dirInfo, supportedExtensions,
-                            deleteDetectionEnabled, useSeenBasedDelete, telemetry, taskType);
+                            deleteDetectionEnabled, useSeenBasedDelete, deferTouchToPostScan, telemetry, taskType);
                     tracker.onDirectorySkipped(dirInfo.getRelativePath());
                     incrementCounter("music.scan.dir.skipped", 1,
                             "task_type", taskType.name(), "reason", "RESUME");
@@ -232,7 +250,7 @@ public class PipelineScanService {
                 // Check directory signature
                 if (directorySkipEnabled && isDirectoryUnchanged(config.getId(), dirInfo, dirPathMd5)) {
                     markSkippedDirectory(taskId, config.getId(), dirInfo, supportedExtensions,
-                            deleteDetectionEnabled, useSeenBasedDelete, telemetry, taskType);
+                            deleteDetectionEnabled, useSeenBasedDelete, deferTouchToPostScan, telemetry, taskType);
                     tracker.onDirectorySkipped(dirInfo.getRelativePath());
                     incrementCounter("music.scan.dir.skipped", 1,
                             "task_type", taskType.name(), "reason", "SIGNATURE");
@@ -243,13 +261,36 @@ public class PipelineScanService {
                 // Detect cover art
                 String coverUrl = coverArtDetector.detectCoverInDirectory(dirInfo.getFiles());
 
-                final WebDavDirectoryInfo finalDirInfo = dirInfo;
-                final String finalDirPathMd5 = dirPathMd5;
-                final String finalCoverUrl = coverUrl;
-                processCompletionService.submit(() -> processDirectoryTask(
-                        taskId, config, finalDirInfo, finalDirPathMd5, finalCoverUrl,
-                        supportedExtensions, lyricExtensions, useSeenBasedDelete, taskType, telemetry));
-                processInFlight++;
+                // Count audio files for small-dir merging decision
+                int audioFileCount = countAudioFiles(dirInfo.getFiles(), supportedExtensions);
+
+                // Small-directory merging: accumulate tiny dirs and submit as a single process task
+                if (smallDirMergeThreshold > 0 && audioFileCount <= smallDirMergeThreshold) {
+                    smallDirBatch.add(new SmallDirEntry(dirInfo, dirPathMd5, coverUrl));
+                    smallDirBatchFileCount += audioFileCount;
+
+                    // Flush merged batch when accumulated enough files
+                    if (smallDirBatchFileCount >= dbBatchSize) {
+                        final List<SmallDirEntry> batchToSubmit = new ArrayList<>(smallDirBatch);
+                        processCompletionService.submit(() -> processMergedDirectoryTask(
+                                taskId, config, batchToSubmit,
+                                supportedExtensions, lyricExtensions, useSeenBasedDelete, deferTouchToPostScan,
+                                taskType, telemetry));
+                        processInFlight++;
+                        smallDirBatch.clear();
+                        smallDirBatchFileCount = 0;
+                    }
+                } else {
+                    // Normal submission for larger directories
+                    final WebDavDirectoryInfo finalDirInfo = dirInfo;
+                    final String finalDirPathMd5 = dirPathMd5;
+                    final String finalCoverUrl = coverUrl;
+                    processCompletionService.submit(() -> processDirectoryTask(
+                            taskId, config, finalDirInfo, finalDirPathMd5, finalCoverUrl,
+                            supportedExtensions, lyricExtensions, useSeenBasedDelete, deferTouchToPostScan,
+                            taskType, telemetry));
+                    processInFlight++;
+                }
 
                 if (processInFlight >= directoryProcessMaxInFlight) {
                     processInFlight -= drainCompletedDirectoryTasks(
@@ -284,13 +325,44 @@ public class PipelineScanService {
                 }
             }
 
+            // Flush remaining small-directory merge batch
+            if (!result.isCanceled() && !smallDirBatch.isEmpty()) {
+                final List<SmallDirEntry> remainingBatch = new ArrayList<>(smallDirBatch);
+                processCompletionService.submit(() -> processMergedDirectoryTask(
+                        taskId, config, remainingBatch,
+                        supportedExtensions, lyricExtensions, useSeenBasedDelete, deferTouchToPostScan,
+                        taskType, telemetry));
+                processInFlight++;
+                smallDirBatch.clear();
+                smallDirBatchFileCount = 0;
+            }
+
             if (!result.isCanceled() && processInFlight > 0) {
                 processInFlight -= drainCompletedDirectoryTasks(
                         processCompletionService, processInFlight, taskId, config.getId(), result, tracker, taskType, telemetry);
             }
 
-            // Post-scan: soft-delete + dedup
+            // Phase transition: all dirs processed, entering post-scan phase
+            tracker.enterProcessPhase();
+
+            // Post-scan: deferred touch + soft-delete + dedup
             if (!result.isCanceled()) {
+                if (deferTouchToPostScan) {
+                    // Single config-wide UPDATE replaces thousands of per-directory LIKE UPDATEs.
+                    // This is the critical optimization for repeat scans: O(1) instead of O(dirs).
+                    long touchStartNanos = System.nanoTime();
+                    try {
+                        int touchedRows = trackMapper.touchLastScanTaskByConfig(taskId, config.getId());
+                        long touchElapsed = System.nanoTime() - touchStartNanos;
+                        telemetry.recordTouchByPrefix(touchElapsed);
+                        log.info("POST_SCAN_BULK_TOUCH taskId={} configId={} touchedRows={} elapsedMs={}",
+                                taskId, config.getId(), touchedRows,
+                                String.format("%.1f", touchElapsed / 1_000_000.0));
+                    } catch (Exception e) {
+                        telemetry.recordTouchByPrefixFailed();
+                        log.warn("Post-scan bulk touch failed, taskId={}, configId={}", taskId, config.getId(), e);
+                    }
+                }
                 if (deleteDetectionEnabled) {
                     int deleted = useSeenBasedDelete
                             ? trackMapper.softDeleteByTaskId(taskId, config.getId())
@@ -334,12 +406,7 @@ public class PipelineScanService {
 
         long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - taskStartNanos);
         telemetry.logSummary(elapsedMs, result);
-        log.info("PIPELINE_SCAN_FINISH taskId={} totalFiles={} audioFiles={} added={} updated={} deleted={} "
-                + "deduped={} failed={} dirsTotal={} dirsSkipped={} elapsedMs={} elapsed={}",
-                taskId, result.getTotalFiles(), result.getAudioFiles(), result.getAddedCount(),
-                result.getUpdatedCount(), result.getDeletedCount(), result.getDeduplicatedCount(),
-                result.getFailedCount(), tracker.getTotalDirectoriesDiscovered(),
-                tracker.getSkippedDirectories(), elapsedMs, formatElapsed(elapsedMs));
+        logDetailedSummary(taskId, config, taskType, result, tracker, elapsedMs);
         return result;
     }
 
@@ -392,6 +459,7 @@ public class PipelineScanService {
                                       Set<String> supportedExtensions,
                                       boolean deleteDetectionEnabled,
                                       boolean useSeenBasedDelete,
+                                      boolean deferTouchToPostScan,
                                       ScanTelemetry telemetry,
                                       TaskType taskType) {
         if (!deleteDetectionEnabled) {
@@ -399,6 +467,11 @@ public class PipelineScanService {
         }
         if (useSeenBasedDelete) {
             recordSeenFilesForDirectory(taskId, dirInfo, supportedExtensions, telemetry, taskType);
+            return;
+        }
+        // When deferTouchToPostScan is true, skip per-directory LIKE UPDATE entirely.
+        // A single config-wide touch will be done in post-scan phase instead.
+        if (deferTouchToPostScan) {
             return;
         }
         touchLastScanTaskForDirectory(taskId, configId,
@@ -447,13 +520,14 @@ public class PipelineScanService {
                                                       WebDavDirectoryInfo dirInfo, String dirPathMd5,
                                                       String coverUrl, Set<String> supportedExtensions,
                                                       Set<String> lyricExtensions, boolean collectSeenForDelete,
+                                                      boolean deferTouchToPostScan,
                                                       TaskType taskType,
                                                       ScanTelemetry telemetry) {
         long processStartNanos = System.nanoTime();
         try {
             DirProcessResult dirResult = processDirectoryFiles(
                     taskId, config, dirInfo, coverUrl, supportedExtensions, lyricExtensions, collectSeenForDelete,
-                    telemetry, taskType);
+                    deferTouchToPostScan, telemetry, taskType);
             long elapsed = System.nanoTime() - processStartNanos;
             telemetry.recordProcessSuccess(elapsed);
             recordDuration("music.scan.dir.process.duration", elapsed,
@@ -515,46 +589,44 @@ public class PipelineScanService {
 
         DirProcessResult dirResult = outcome.dirResult;
         result.addDirResult(dirResult);
+
+        // For merged small-directory batches, save checkpoint/signature per entry
+        if (outcome.isMerged()) {
+            for (SmallDirEntry entry : outcome.mergedEntries) {
+                applySingleDirCheckpoint(taskId, configId, entry.dirInfo, entry.dirPathMd5,
+                        taskType, telemetry);
+            }
+        } else {
+            applySingleDirCheckpoint(taskId, configId, outcome.dirInfo, outcome.dirPathMd5,
+                    taskType, telemetry);
+        }
+
         int checkpointFailedCount = dirResult.failed;
-        String checkpointStatus = dirResult.failed > 0 ? "FAILED" : "COMPLETED";
-        String checkpointError = null;
 
-        try {
-            long signatureStart = System.nanoTime();
-            updateDirectorySignature(configId, outcome.dirInfo, outcome.dirPathMd5);
-            long elapsed = System.nanoTime() - signatureStart;
-            telemetry.recordSignatureUpdate(elapsed);
-            recordDuration("music.scan.db.signature_upsert.duration", elapsed,
-                    "task_type", taskType.name(), "result", "OK");
-        } catch (Exception e) {
-            checkpointStatus = "FAILED";
-            checkpointFailedCount += 1;
-            checkpointError = limitLength("目录签名更新失败: " + e.getMessage(), 1000);
-            result.incrementFailedCount();
-            telemetry.recordSignatureUpdateFailed();
-            incrementCounter("music.scan.dir.failed", 1, "task_type", taskType.name(), "stage", "SIGNATURE");
-            log.warn("Update directory signature failed, taskId={}, dir={}",
-                    taskId, outcome.dirRelativePath, e);
+        // For merged outcomes, report completion for each constituent directory
+        if (outcome.isMerged()) {
+            int entryCount = outcome.mergedEntries.size();
+            // Distribute counts across entries for tracker (approximate)
+            for (int i = 0; i < entryCount; i++) {
+                SmallDirEntry entry = outcome.mergedEntries.get(i);
+                if (i == 0) {
+                    // First entry gets the counts
+                    tracker.onDirectoryCompleted(entry.dirInfo.getRelativePath(),
+                            dirResult.processed, dirResult.added, dirResult.updated,
+                            dirResult.skipped, checkpointFailedCount);
+                } else {
+                    // Remaining entries are counted as completed with zero counts
+                    tracker.onDirectoryCompleted(entry.dirInfo.getRelativePath(), 0, 0, 0, 0, 0);
+                }
+            }
+            incrementCounter("music.scan.dir.processed", entryCount, "task_type", taskType.name());
+        } else {
+            tracker.onDirectoryCompleted(outcome.dirRelativePath,
+                    dirResult.processed, dirResult.added, dirResult.updated,
+                    dirResult.skipped, checkpointFailedCount);
+            incrementCounter("music.scan.dir.processed", 1, "task_type", taskType.name());
         }
 
-        try {
-            long checkpointStart = System.nanoTime();
-            saveCheckpoint(taskId, outcome.dirRelativePath, outcome.dirPathMd5,
-                    checkpointStatus, outcome.fileCount, dirResult.processed, checkpointFailedCount, checkpointError);
-            long elapsed = System.nanoTime() - checkpointStart;
-            telemetry.recordCheckpointUpdate(elapsed);
-            recordDuration("music.scan.db.checkpoint_upsert.duration", elapsed,
-                    "task_type", taskType.name(), "result", "OK");
-        } catch (Exception e) {
-            telemetry.recordCheckpointUpdateFailed();
-            incrementCounter("music.scan.dir.failed", 1, "task_type", taskType.name(), "stage", "CHECKPOINT");
-            log.warn("Save checkpoint failed, taskId={}, dir={}", taskId, outcome.dirRelativePath, e);
-        }
-
-        tracker.onDirectoryCompleted(outcome.dirRelativePath,
-                dirResult.processed, dirResult.added, dirResult.updated,
-                dirResult.skipped, checkpointFailedCount);
-        incrementCounter("music.scan.dir.processed", 1, "task_type", taskType.name());
         incrementCounter("music.scan.file.audio", dirResult.audioFiles, "task_type", taskType.name());
         incrementCounter("music.scan.file.added", dirResult.added, "task_type", taskType.name());
         incrementCounter("music.scan.file.updated", dirResult.updated, "task_type", taskType.name());
@@ -562,11 +634,52 @@ public class PipelineScanService {
         incrementCounter("music.scan.file.failed", checkpointFailedCount, "task_type", taskType.name());
     }
 
+    private void applySingleDirCheckpoint(Long taskId, Long configId,
+                                           WebDavDirectoryInfo dirInfo, String dirPathMd5,
+                                           TaskType taskType, ScanTelemetry telemetry) {
+        String checkpointStatus = "COMPLETED";
+        String checkpointError = null;
+        int failedCount = 0;
+
+        try {
+            long signatureStart = System.nanoTime();
+            updateDirectorySignature(configId, dirInfo, dirPathMd5);
+            long elapsed = System.nanoTime() - signatureStart;
+            telemetry.recordSignatureUpdate(elapsed);
+            recordDuration("music.scan.db.signature_upsert.duration", elapsed,
+                    "task_type", taskType.name(), "result", "OK");
+        } catch (Exception e) {
+            checkpointStatus = "FAILED";
+            failedCount = 1;
+            checkpointError = limitLength("目录签名更新失败: " + e.getMessage(), 1000);
+            telemetry.recordSignatureUpdateFailed();
+            incrementCounter("music.scan.dir.failed", 1, "task_type", taskType.name(), "stage", "SIGNATURE");
+            log.warn("Update directory signature failed, taskId={}, dir={}",
+                    taskId, dirInfo.getRelativePath(), e);
+        }
+
+        try {
+            int fileCount = dirInfo.getFiles() == null ? 0 : dirInfo.getFiles().size();
+            long checkpointStart = System.nanoTime();
+            saveCheckpoint(taskId, dirInfo.getRelativePath(), dirPathMd5,
+                    checkpointStatus, fileCount, fileCount, failedCount, checkpointError);
+            long elapsed = System.nanoTime() - checkpointStart;
+            telemetry.recordCheckpointUpdate(elapsed);
+            recordDuration("music.scan.db.checkpoint_upsert.duration", elapsed,
+                    "task_type", taskType.name(), "result", "OK");
+        } catch (Exception e) {
+            telemetry.recordCheckpointUpdateFailed();
+            incrementCounter("music.scan.dir.failed", 1, "task_type", taskType.name(), "stage", "CHECKPOINT");
+            log.warn("Save checkpoint failed, taskId={}, dir={}", taskId, dirInfo.getRelativePath(), e);
+        }
+    }
+
     private DirProcessResult processDirectoryFiles(Long taskId, WebDavConfigEntity config,
                                                    WebDavDirectoryInfo dirInfo,
                                                    String coverUrl, Set<String> supportedExtensions,
                                                    Set<String> lyricExtensions,
                                                    boolean collectSeenForDelete,
+                                                   boolean deferTouchToPostScan,
                                                    ScanTelemetry telemetry,
                                                    TaskType taskType) {
         DirProcessResult dirResult = new DirProcessResult();
@@ -576,6 +689,9 @@ public class PipelineScanService {
         List<AudioCandidate> audioCandidates = new ArrayList<>();
         Map<String, String> lyricPathIndex = buildLyricPathIndex(dirInfo.getFiles(), lyricExtensions);
         int dbBatchSize = Math.max(10, appScanProperties.getDbBatchSize());
+        int bulkWriteSize = appScanProperties.getBulkWriteBatchSize() > 0
+                ? appScanProperties.getBulkWriteBatchSize()
+                : Math.max(10, dbBatchSize * 2);
 
         for (WebDavFileObject file : dirInfo.getFiles()) {
             String relativePath = normalizeRelativePath(file.getRelativePath());
@@ -611,9 +727,10 @@ public class PipelineScanService {
                         file, metadata, coverUrl, lyricPath);
                 boolean activeExisting = existing != null && !Objects.equals(existing.getIsDeleted(), 1);
                 if (activeExisting && sameFingerprint(existing, file) && sameTrackMetadata(existing, entity)) {
-                    if (!collectSeenForDelete) {
+                    // Skip per-file touch when deferred to post-scan bulk touch
+                    if (!collectSeenForDelete && !deferTouchToPostScan) {
                         touchMd5Batch.add(pathMd5);
-                        if (touchMd5Batch.size() >= dbBatchSize) {
+                        if (touchMd5Batch.size() >= bulkWriteSize) {
                             flushTouchedBatch(taskId, config.getId(), touchMd5Batch, telemetry, taskType);
                         }
                     }
@@ -651,7 +768,7 @@ public class PipelineScanService {
 
         // Batch insert seen files
         if (collectSeenForDelete && !seenMd5Batch.isEmpty()) {
-            batchInsertSeenFiles(taskId, seenMd5Batch, dbBatchSize, telemetry, taskType);
+            batchInsertSeenFiles(taskId, seenMd5Batch, bulkWriteSize, telemetry, taskType);
         }
 
         return dirResult;
@@ -784,8 +901,10 @@ public class PipelineScanService {
             md5List.add(HashUtil.md5Hex(relativePath));
         }
         if (!md5List.isEmpty()) {
-            batchInsertSeenFiles(taskId, md5List, Math.max(10, appScanProperties.getDbBatchSize()),
-                    telemetry, taskType);
+            int bulkSize = appScanProperties.getBulkWriteBatchSize() > 0
+                    ? appScanProperties.getBulkWriteBatchSize()
+                    : Math.max(10, appScanProperties.getDbBatchSize() * 2);
+            batchInsertSeenFiles(taskId, md5List, bulkSize, telemetry, taskType);
         }
     }
 
@@ -1173,7 +1292,124 @@ public class PipelineScanService {
         return false;
     }
 
+    // ── Merged small-directory processing ─────────────────
+
+    private DirectoryTaskOutcome processMergedDirectoryTask(Long taskId, WebDavConfigEntity config,
+                                                             List<SmallDirEntry> entries,
+                                                             Set<String> supportedExtensions,
+                                                             Set<String> lyricExtensions,
+                                                             boolean collectSeenForDelete,
+                                                             boolean deferTouchToPostScan,
+                                                             TaskType taskType,
+                                                             ScanTelemetry telemetry) {
+        // Process all small directories as a single batch to reduce overhead.
+        // We return a composite DirectoryTaskOutcome for the first entry and
+        // accumulate results across all entries.
+        DirProcessResult compositeResult = new DirProcessResult();
+        Exception firstError = null;
+        WebDavDirectoryInfo firstDirInfo = entries.get(0).dirInfo;
+        String firstDirPathMd5 = entries.get(0).dirPathMd5;
+
+        long processStartNanos = System.nanoTime();
+        for (SmallDirEntry entry : entries) {
+            try {
+                DirProcessResult dirResult = processDirectoryFiles(
+                        taskId, config, entry.dirInfo, entry.coverUrl, supportedExtensions,
+                        lyricExtensions, collectSeenForDelete, deferTouchToPostScan, telemetry, taskType);
+                compositeResult.processed += dirResult.processed;
+                compositeResult.added += dirResult.added;
+                compositeResult.updated += dirResult.updated;
+                compositeResult.skipped += dirResult.skipped;
+                compositeResult.failed += dirResult.failed;
+                compositeResult.audioFiles += dirResult.audioFiles;
+            } catch (Exception e) {
+                compositeResult.failed++;
+                if (firstError == null) {
+                    firstError = e;
+                }
+            }
+        }
+        long elapsed = System.nanoTime() - processStartNanos;
+
+        if (firstError != null && compositeResult.processed == 0) {
+            telemetry.recordProcessFailed(elapsed);
+            recordDuration("music.scan.dir.process.duration", elapsed,
+                    "task_type", taskType.name(), "result", "ERROR");
+            return DirectoryTaskOutcome.failed(firstDirInfo, firstDirPathMd5, firstError);
+        }
+
+        telemetry.recordProcessSuccess(elapsed);
+        recordDuration("music.scan.dir.process.duration", elapsed,
+                "task_type", taskType.name(), "result", "OK");
+
+        // Create a merged outcome; we need to apply individual outcomes per entry
+        // in applyDirectoryTaskOutcome, so we return a special composite.
+        return DirectoryTaskOutcome.merged(entries, compositeResult);
+    }
+
+    private int countAudioFiles(List<WebDavFileObject> files, Set<String> supportedExtensions) {
+        int count = 0;
+        for (WebDavFileObject file : files) {
+            String relativePath = normalizeRelativePath(file.getRelativePath());
+            if (StringUtils.hasText(relativePath) && isAudioFile(relativePath, supportedExtensions)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    // ── Detailed final summary ──────────────────────────────
+
+    private void logDetailedSummary(Long taskId, WebDavConfigEntity config, TaskType taskType,
+                                     ScanResult result, ScanProgressTracker tracker, long elapsedMs) {
+        int dirsTotal = tracker.getTotalDirectoriesDiscovered();
+        int dirsProcessed = tracker.getCompletedDirectories() - tracker.getSkippedDirectories();
+        int dirsSkipped = tracker.getSkippedDirectories();
+        double avgSpeed = elapsedMs > 0 ? result.getAudioFiles() * 1000.0 / elapsedMs : 0;
+
+        log.info("\n========== SCAN COMPLETE ==========\n"
+                        + "  Task ID:        {}\n"
+                        + "  Config:         {} (id={})\n"
+                        + "  Type:           {}\n"
+                        + "  Duration:       {}\n"
+                        + "  Directories:    {} total ({} skipped, {} processed)\n"
+                        + "  Files:          {} audio / {} total discovered\n"
+                        + "    Added:        {}\n"
+                        + "    Updated:      {}\n"
+                        + "    Skipped:      {} (unchanged)\n"
+                        + "    Failed:       {}\n"
+                        + "    Deleted:      {}\n"
+                        + "    Deduplicated: {}\n"
+                        + "  Speed:          {} files/s avg\n"
+                        + "====================================",
+                taskId,
+                config.getName(), config.getId(),
+                taskType.name(),
+                formatElapsed(elapsedMs),
+                dirsTotal, dirsSkipped, dirsProcessed,
+                result.getAudioFiles(), tracker.getTotalFilesDiscovered(),
+                result.getAddedCount(),
+                result.getUpdatedCount(),
+                tracker.getFilesSkipped(),
+                result.getFailedCount(),
+                result.getDeletedCount(),
+                result.getDeduplicatedCount(),
+                String.format(Locale.ROOT, "%.1f", avgSpeed));
+    }
+
     // --- Inner classes ---
+
+    private static class SmallDirEntry {
+        final WebDavDirectoryInfo dirInfo;
+        final String dirPathMd5;
+        final String coverUrl;
+
+        SmallDirEntry(WebDavDirectoryInfo dirInfo, String dirPathMd5, String coverUrl) {
+            this.dirInfo = dirInfo;
+            this.dirPathMd5 = dirPathMd5;
+            this.coverUrl = coverUrl;
+        }
+    }
 
     private static class ScanTelemetry {
         private final Long taskId;
@@ -1381,24 +1617,38 @@ public class PipelineScanService {
         private final int fileCount;
         private final DirProcessResult dirResult;
         private final Exception error;
+        /** Non-null only for merged small-directory batches */
+        private final List<SmallDirEntry> mergedEntries;
 
         private DirectoryTaskOutcome(WebDavDirectoryInfo dirInfo, String dirPathMd5,
-                                     DirProcessResult dirResult, Exception error) {
+                                     DirProcessResult dirResult, Exception error,
+                                     List<SmallDirEntry> mergedEntries) {
             this.dirInfo = dirInfo;
             this.dirRelativePath = dirInfo == null ? "" : dirInfo.getRelativePath();
             this.dirPathMd5 = dirPathMd5;
             this.fileCount = dirInfo == null || dirInfo.getFiles() == null ? 0 : dirInfo.getFiles().size();
             this.dirResult = dirResult;
             this.error = error;
+            this.mergedEntries = mergedEntries;
         }
 
         private static DirectoryTaskOutcome success(WebDavDirectoryInfo dirInfo, String dirPathMd5,
                                                     DirProcessResult dirResult) {
-            return new DirectoryTaskOutcome(dirInfo, dirPathMd5, dirResult, null);
+            return new DirectoryTaskOutcome(dirInfo, dirPathMd5, dirResult, null, null);
         }
 
         private static DirectoryTaskOutcome failed(WebDavDirectoryInfo dirInfo, String dirPathMd5, Exception error) {
-            return new DirectoryTaskOutcome(dirInfo, dirPathMd5, null, error);
+            return new DirectoryTaskOutcome(dirInfo, dirPathMd5, null, error, null);
+        }
+
+        private static DirectoryTaskOutcome merged(List<SmallDirEntry> entries, DirProcessResult compositeResult) {
+            WebDavDirectoryInfo firstInfo = entries.get(0).dirInfo;
+            String firstMd5 = entries.get(0).dirPathMd5;
+            return new DirectoryTaskOutcome(firstInfo, firstMd5, compositeResult, null, entries);
+        }
+
+        private boolean isMerged() {
+            return mergedEntries != null && !mergedEntries.isEmpty();
         }
     }
 

@@ -98,6 +98,26 @@ public class AppScanProperties {
     private boolean fullSeenDeleteFallbackEnabled = false;
 
     /**
+     * Batch size for bulk write operations (seen-file inserts, touch updates).
+     * These are simple operations so can use larger batches than track upserts.
+     * Defaults to dbBatchSize * 2 if not set (0).
+     */
+    private int bulkWriteBatchSize = 0;
+
+    /**
+     * Max audio file count for a directory to be considered "small" and merged with other small dirs
+     * into a single process task. Reduces thread scheduling overhead for many tiny directories.
+     * Set to 0 to disable merging.
+     */
+    private int smallDirMergeThreshold = 5;
+
+    /**
+     * Warn in logs when a directory contains more audio files than this threshold.
+     * Helps identify bottleneck directories during large scans. Set to 0 to disable.
+     */
+    private int largeDirWarnThreshold = 500;
+
+    /**
      * Whether incremental scan performs soft-delete detection.
      * Keep false for performance; use periodic FULL scan to reconcile deletions.
      */

@@ -49,8 +49,9 @@ app:
     audio-extensions: mp3,flac,m4a,aac,ogg,wav
     lyric-extensions: lrc,txt
     incremental-cron: "0 0 3 * * ?"
-    db-batch-size: 200
-    progress-persist-interval-sec: 60
+    db-batch-size: 500
+    bulk-write-batch-size: 1000
+    progress-persist-interval-sec: 120
     metadata-head-bytes: 131072
     metadata-tail-bytes: 128
     directory-list-thread-count: 8
@@ -67,6 +68,8 @@ app:
     full-seen-delete-fallback-enabled: false
     incremental-enable-delete-detection: false
     incremental-enable-dedup: false
+    small-dir-merge-threshold: 5
+    large-dir-warn-threshold: 500
   playlist:
     cleanup-enabled: false
     cleanup-cron: "0 30 4 * * ?"
