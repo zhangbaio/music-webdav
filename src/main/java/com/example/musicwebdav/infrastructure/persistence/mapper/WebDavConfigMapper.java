@@ -7,6 +7,7 @@ import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Options;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
+import org.apache.ibatis.annotations.Update;
 
 @Mapper
 public interface WebDavConfigMapper {
@@ -15,6 +16,10 @@ public interface WebDavConfigMapper {
             + "VALUES(#{name}, #{baseUrl}, #{username}, #{passwordEnc}, #{rootPath}, #{enabled})")
     @Options(useGeneratedKeys = true, keyProperty = "id")
     int insert(WebDavConfigEntity entity);
+
+    @Update("UPDATE webdav_config SET name=#{name}, base_url=#{baseUrl}, username=#{username}, "
+            + "password_enc=#{passwordEnc}, root_path=#{rootPath}, enabled=#{enabled} WHERE id=#{id}")
+    int updateById(WebDavConfigEntity entity);
 
     @Select("SELECT id, name, base_url, username, password_enc, root_path, enabled, created_at, updated_at "
             + "FROM webdav_config WHERE id = #{id}")

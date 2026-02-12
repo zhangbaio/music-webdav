@@ -8,10 +8,13 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.example.musicwebdav.api.request.AdminWebDavRecoveryRequest;
 import com.example.musicwebdav.api.request.CreateWebDavConfigRequest;
 import com.example.musicwebdav.api.response.WebDavConfigResponse;
+import com.example.musicwebdav.api.response.WebDavRecoveryStatusResponse;
 import com.example.musicwebdav.api.response.WebDavTestResponse;
 import com.example.musicwebdav.common.config.AppSecurityProperties;
 import com.example.musicwebdav.common.exception.BusinessException;
@@ -102,13 +105,7 @@ class WebDavConnectionServiceTest {
 
     @Test
     void testSavedConnectionShouldUseEnabledConfigWhenIdNotProvided() {
-        WebDavConfigEntity config = new WebDavConfigEntity();
-        config.setId(1L);
-        config.setBaseUrl("https://dav.example.com");
-        config.setUsername("alice");
-        config.setPasswordEnc(AesCryptoUtil.encrypt("secret-pass", "1234567890abcdef"));
-        config.setRootPath("/music");
-        config.setEnabled(1);
+        WebDavConfigEntity config = buildConfig(1L, "alice", "secret-pass", "/music");
 
         when(webDavConfigMapper.selectFirstEnabled()).thenReturn(config);
         when(webDavClient.testConnection(
@@ -127,6 +124,54 @@ class WebDavConnectionServiceTest {
     }
 
     @Test
+    void testSavedConnectionAuthFailureShouldMarkNeedsReauthStatus() {
+        WebDavConfigEntity config = buildConfig(2L, "alice", "secret-pass", "/music");
+
+        when(webDavConfigMapper.selectFirstEnabled()).thenReturn(config);
+        when(webDavConfigMapper.selectById(2L)).thenReturn(config);
+        when(webDavClient.testConnection(any(String.class), any(String.class), any(String.class), any(String.class)))
+                .thenReturn(WebDavConnectResult.failure(
+                        "WEBDAV_AUTH_FAILED",
+                        "WebDAV鉴权失败",
+                        "请联系管理员检查用户名或密码",
+                        "NO_PERMISSION"));
+
+        WebDavTestResponse response = webDavConnectionService.testSavedConnection(null);
+        WebDavRecoveryStatusResponse recoveryStatus = webDavConnectionService.getRecoveryStatus(2L);
+
+        assertEquals("FAILED", response.getStatus());
+        assertEquals("needs_reauth", recoveryStatus.getStatus());
+        assertEquals("WEBDAV_AUTH_FAILED", recoveryStatus.getCode());
+    }
+
+    @Test
+    void adminRecoverShouldPatchConfigAndReturnHealthyStatus() {
+        WebDavConfigEntity config = buildConfig(3L, "old-user", "old-pass", "/old");
+        when(webDavConfigMapper.selectById(3L)).thenReturn(config);
+        when(webDavClient.testConnection(
+                eq("https://dav.example.com"),
+                eq("new-user"),
+                eq("new-pass"),
+                eq("/new")))
+                .thenReturn(WebDavConnectResult.success("连接成功"));
+
+        AdminWebDavRecoveryRequest request = new AdminWebDavRecoveryRequest();
+        request.setConfigId(3L);
+        request.setUsername("new-user");
+        request.setPassword("new-pass");
+        request.setRootPath("/new");
+
+        WebDavRecoveryStatusResponse response = webDavConnectionService.adminRecover(request, "api-client");
+
+        assertEquals("healthy", response.getStatus());
+        assertEquals("WEBDAV_TEST_OK", response.getCode());
+        assertEquals("new-user", config.getUsername());
+        assertEquals("/new", config.getRootPath());
+        assertEquals("new-pass", AesCryptoUtil.decrypt(config.getPasswordEnc(), "1234567890abcdef"));
+        verify(webDavConfigMapper).updateById(config);
+    }
+
+    @Test
     void testSavedConnectionShouldFailWhenNoConfigPresent() {
         when(webDavConfigMapper.selectFirstEnabled()).thenReturn(null);
 
@@ -135,5 +180,16 @@ class WebDavConnectionServiceTest {
                 () -> webDavConnectionService.testSavedConnection(null));
 
         assertEquals("WEBDAV_CONFIG_NOT_FOUND", ex.getCode());
+    }
+
+    private WebDavConfigEntity buildConfig(Long id, String username, String password, String rootPath) {
+        WebDavConfigEntity config = new WebDavConfigEntity();
+        config.setId(id);
+        config.setBaseUrl("https://dav.example.com");
+        config.setUsername(username);
+        config.setPasswordEnc(AesCryptoUtil.encrypt(password, "1234567890abcdef"));
+        config.setRootPath(rootPath);
+        config.setEnabled(1);
+        return config;
     }
 }

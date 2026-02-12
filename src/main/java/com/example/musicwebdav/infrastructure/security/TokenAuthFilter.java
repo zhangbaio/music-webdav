@@ -12,6 +12,7 @@ import javax.servlet.FilterChain;
 import javax.servlet.ServletException;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
+import org.springframework.http.HttpHeaders;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
@@ -106,7 +107,26 @@ public class TokenAuthFilter extends OncePerRequestFilter {
         response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
         response.setCharacterEncoding(StandardCharsets.UTF_8.name());
         response.setContentType("application/json;charset=UTF-8");
+        response.setHeader(HttpHeaders.WWW_AUTHENTICATE, buildWwwAuthenticateValue(code, message));
         ApiResponse<Void> body = ApiResponse.fail(code, message, userAction);
         response.getWriter().write(objectMapper.writeValueAsString(body));
+    }
+
+    private String buildWwwAuthenticateValue(String code, String message) {
+        String error = "invalid_token";
+        if (code == null || code.trim().isEmpty()) {
+            error = "invalid_request";
+        } else if (!(code.startsWith("AUTH_") || "AUTH_MISSING_TOKEN".equals(code))) {
+            error = "invalid_request";
+        }
+
+        String description = message == null || message.trim().isEmpty()
+                ? "authentication failed"
+                : sanitizeAuthHeaderValue(message);
+        return "Bearer error=\"" + error + "\", error_description=\"" + description + "\"";
+    }
+
+    private String sanitizeAuthHeaderValue(String value) {
+        return value.replace("\\", "").replace("\"", "").trim();
     }
 }

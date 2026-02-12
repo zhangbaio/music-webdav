@@ -1,9 +1,11 @@
 package com.example.musicwebdav.application.service;
 
+import com.example.musicwebdav.api.request.AdminWebDavRecoveryRequest;
 import com.example.musicwebdav.api.request.CreateWebDavConfigRequest;
 import com.example.musicwebdav.api.request.WebDavTestRequest;
 import com.example.musicwebdav.api.response.WebDavDirectoryItemResponse;
 import com.example.musicwebdav.api.response.WebDavConfigResponse;
+import com.example.musicwebdav.api.response.WebDavRecoveryStatusResponse;
 import com.example.musicwebdav.api.response.WebDavTestResponse;
 import com.example.musicwebdav.common.config.AppSecurityProperties;
 import com.example.musicwebdav.common.exception.BusinessException;
@@ -21,18 +23,39 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.stream.Collectors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 
 @Service
 public class WebDavConnectionService {
 
+    private static final Logger log = LoggerFactory.getLogger(WebDavConnectionService.class);
+
+    private static final String RECOVERY_NEEDS_REAUTH = "needs_reauth";
+    private static final String RECOVERY_RECOVERING = "recovering";
+    private static final String RECOVERY_HEALTHY = "healthy";
+    private static final String RECOVERY_FAILED = "failed";
+
+    private static final Set<String> AUTH_RECOVERY_CODES = new HashSet<String>();
+
+    static {
+        AUTH_RECOVERY_CODES.add("WEBDAV_AUTH_FAILED");
+        AUTH_RECOVERY_CODES.add("WEBDAV_PERMISSION_DENIED");
+    }
+
     private final WebDavClient webDavClient;
     private final WebDavConfigMapper webDavConfigMapper;
     private final AppSecurityProperties appSecurityProperties;
+    private final ConcurrentMap<Long, RecoveryState> recoveryStateByConfig = new ConcurrentHashMap<Long, RecoveryState>();
 
     public WebDavConnectionService(WebDavClient webDavClient,
                                    WebDavConfigMapper webDavConfigMapper,
@@ -70,7 +93,57 @@ public class WebDavConnectionService {
                 config.getUsername(),
                 decryptPassword(config.getPasswordEnc()),
                 config.getRootPath());
+        markRecoveryFromConnectResult(config.getId(), result);
         return toTestResponse(result, System.currentTimeMillis() - start);
+    }
+
+    public WebDavRecoveryStatusResponse getRecoveryStatus(Long configId) {
+        WebDavConfigEntity config = loadConfigForTest(configId);
+        RecoveryState state = recoveryStateByConfig.get(config.getId());
+        if (state == null) {
+            return new WebDavRecoveryStatusResponse(
+                    RECOVERY_HEALTHY,
+                    config.getId(),
+                    "WEBDAV_RECOVERY_OK",
+                    "连接状态正常",
+                    null);
+        }
+        return new WebDavRecoveryStatusResponse(
+                state.status,
+                config.getId(),
+                state.code,
+                state.message,
+                state.userAction);
+    }
+
+    public WebDavRecoveryStatusResponse adminRecover(AdminWebDavRecoveryRequest request, String actor) {
+        WebDavConfigEntity config = loadConfigForTest(request == null ? null : request.getConfigId());
+        updateRecoveryState(config.getId(), RECOVERY_RECOVERING, "WEBDAV_RECOVERY_IN_PROGRESS", "正在执行管理员恢复", null);
+
+        boolean changed = applyRecoveryPatch(config, request);
+        if (changed) {
+            webDavConfigMapper.updateById(config);
+        }
+
+        WebDavConnectResult result = webDavClient.testConnection(
+                config.getBaseUrl(),
+                config.getUsername(),
+                decryptPassword(config.getPasswordEnc()),
+                config.getRootPath());
+
+        String recoveryStatus = resolveRecoveryStatusFromCode(result.getCode(), result.isSuccess());
+        updateRecoveryState(config.getId(), recoveryStatus, result.getCode(), result.getMessage(), result.getUserAction());
+
+        String outcome = result.isSuccess() ? "success" : "failed";
+        log.info("WEBDAV_RECOVERY_AUDIT actor={} action=admin-recover configId={} outcome={} code={}",
+                actor == null ? "unknown" : actor, config.getId(), outcome, result.getCode());
+
+        return new WebDavRecoveryStatusResponse(
+                recoveryStatus,
+                config.getId(),
+                result.getCode(),
+                result.getMessage(),
+                result.getUserAction());
     }
 
     public WebDavConfigResponse createConfig(CreateWebDavConfigRequest request) {
@@ -112,6 +185,7 @@ public class WebDavConnectionService {
         }
 
         WebDavConfigEntity saved = webDavConfigMapper.selectById(entity.getId());
+        updateRecoveryState(saved.getId(), RECOVERY_HEALTHY, "WEBDAV_RECOVERY_OK", "配置可用", null);
         return toResponse(saved);
     }
 
@@ -185,6 +259,94 @@ public class WebDavConnectionService {
                     "请联系管理员先完成后端 WebDAV 配置");
         }
         return config;
+    }
+
+    private boolean applyRecoveryPatch(WebDavConfigEntity config, AdminWebDavRecoveryRequest request) {
+        if (config == null || request == null) {
+            return false;
+        }
+
+        boolean changed = false;
+
+        String baseUrl = request.getBaseUrl() == null || request.getBaseUrl().trim().isEmpty()
+                ? config.getBaseUrl()
+                : normalizeAndValidateBaseUrl(request.getBaseUrl());
+        if (!baseUrl.equals(config.getBaseUrl())) {
+            config.setBaseUrl(baseUrl);
+            changed = true;
+        }
+
+        String username = request.getUsername() == null || request.getUsername().trim().isEmpty()
+                ? config.getUsername()
+                : request.getUsername().trim();
+        if (!username.equals(config.getUsername())) {
+            config.setUsername(username);
+            changed = true;
+        }
+
+        if (request.getPassword() != null && !request.getPassword().trim().isEmpty()) {
+            String passwordEnc = AesCryptoUtil.encrypt(request.getPassword().trim(), appSecurityProperties.getEncryptKey());
+            if (!passwordEnc.equals(config.getPasswordEnc())) {
+                config.setPasswordEnc(passwordEnc);
+                changed = true;
+            }
+        }
+
+        if (request.getRootPath() != null) {
+            String normalizedRootPath = normalizeRootPathForStorage(request.getRootPath());
+            if (!normalizedRootPath.equals(config.getRootPath())) {
+                config.setRootPath(normalizedRootPath);
+                changed = true;
+            }
+        }
+
+        if (request.getEnabled() != null) {
+            int enabled = Boolean.TRUE.equals(request.getEnabled()) ? 1 : 0;
+            if (config.getEnabled() == null || config.getEnabled() != enabled) {
+                config.setEnabled(enabled);
+                changed = true;
+            }
+        }
+
+        return changed;
+    }
+
+    private void markRecoveryFromConnectResult(Long configId, WebDavConnectResult result) {
+        if (configId == null) {
+            return;
+        }
+        if (result == null) {
+            updateRecoveryState(configId, RECOVERY_FAILED, "WEBDAV_TEST_UNKNOWN", "WebDAV连接测试失败", "请稍后重试");
+            return;
+        }
+        String status = resolveRecoveryStatusFromCode(result.getCode(), result.isSuccess());
+        updateRecoveryState(configId, status, result.getCode(), result.getMessage(), result.getUserAction());
+    }
+
+    private String resolveRecoveryStatusFromCode(String code, boolean success) {
+        if (success) {
+            return RECOVERY_HEALTHY;
+        }
+        if (code != null && AUTH_RECOVERY_CODES.contains(code)) {
+            return RECOVERY_NEEDS_REAUTH;
+        }
+        return RECOVERY_FAILED;
+    }
+
+    private void updateRecoveryState(Long configId,
+                                     String status,
+                                     String code,
+                                     String message,
+                                     String userAction) {
+        if (configId == null) {
+            return;
+        }
+        RecoveryState state = new RecoveryState();
+        state.status = status;
+        state.code = code == null ? "WEBDAV_TEST_UNKNOWN" : code;
+        state.message = message == null ? "WebDAV连接测试失败" : message;
+        state.userAction = userAction;
+        recoveryStateByConfig.put(configId, state);
     }
 
     private WebDavConfigEntity loadConfig(Long configId) {
@@ -391,5 +553,13 @@ public class WebDavConnectionService {
                 entity.getCreatedAt(),
                 entity.getUpdatedAt()
         );
+    }
+
+    private static class RecoveryState {
+
+        private String status;
+        private String code;
+        private String message;
+        private String userAction;
     }
 }
