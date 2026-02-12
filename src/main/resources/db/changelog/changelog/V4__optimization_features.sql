@@ -1,5 +1,19 @@
 -- Feature 3: Cover art URL on track table
-ALTER TABLE track ADD COLUMN cover_art_url VARCHAR(2048) NULL COMMENT '目录级封面图URL' AFTER has_cover;
+SET @col_exists = (
+  SELECT COUNT(1)
+  FROM information_schema.columns
+  WHERE table_schema = DATABASE()
+    AND table_name = 'track'
+    AND column_name = 'cover_art_url'
+);
+SET @sql = IF(
+  @col_exists = 0,
+  'ALTER TABLE track ADD COLUMN cover_art_url VARCHAR(2048) NULL COMMENT ''目录级封面图URL'' AFTER has_cover',
+  'SELECT 1'
+);
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
 
 -- Feature 4: Directory signature table for incremental checking
 CREATE TABLE IF NOT EXISTS directory_signature (
@@ -34,7 +48,66 @@ CREATE TABLE IF NOT EXISTS scan_checkpoint (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='扫描检查点表';
 
 -- Feature 7: Progress columns on scan_task
-ALTER TABLE scan_task ADD COLUMN processed_directories INT NULL DEFAULT 0 COMMENT '已处理目录数' AFTER failed_count;
-ALTER TABLE scan_task ADD COLUMN total_directories INT NULL DEFAULT 0 COMMENT '总目录数' AFTER processed_directories;
-ALTER TABLE scan_task ADD COLUMN last_synced_dir VARCHAR(2048) NULL COMMENT '最后同步目录' AFTER total_directories;
-ALTER TABLE scan_task ADD COLUMN progress_pct INT NULL DEFAULT 0 COMMENT '进度百分比' AFTER last_synced_dir;
+SET @col_exists = (
+  SELECT COUNT(1)
+  FROM information_schema.columns
+  WHERE table_schema = DATABASE()
+    AND table_name = 'scan_task'
+    AND column_name = 'processed_directories'
+);
+SET @sql = IF(
+  @col_exists = 0,
+  'ALTER TABLE scan_task ADD COLUMN processed_directories INT NULL DEFAULT 0 COMMENT ''已处理目录数'' AFTER failed_count',
+  'SELECT 1'
+);
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @col_exists = (
+  SELECT COUNT(1)
+  FROM information_schema.columns
+  WHERE table_schema = DATABASE()
+    AND table_name = 'scan_task'
+    AND column_name = 'total_directories'
+);
+SET @sql = IF(
+  @col_exists = 0,
+  'ALTER TABLE scan_task ADD COLUMN total_directories INT NULL DEFAULT 0 COMMENT ''总目录数'' AFTER processed_directories',
+  'SELECT 1'
+);
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @col_exists = (
+  SELECT COUNT(1)
+  FROM information_schema.columns
+  WHERE table_schema = DATABASE()
+    AND table_name = 'scan_task'
+    AND column_name = 'last_synced_dir'
+);
+SET @sql = IF(
+  @col_exists = 0,
+  'ALTER TABLE scan_task ADD COLUMN last_synced_dir VARCHAR(2048) NULL COMMENT ''最后同步目录'' AFTER total_directories',
+  'SELECT 1'
+);
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @col_exists = (
+  SELECT COUNT(1)
+  FROM information_schema.columns
+  WHERE table_schema = DATABASE()
+    AND table_name = 'scan_task'
+    AND column_name = 'progress_pct'
+);
+SET @sql = IF(
+  @col_exists = 0,
+  'ALTER TABLE scan_task ADD COLUMN progress_pct INT NULL DEFAULT 0 COMMENT ''进度百分比'' AFTER last_synced_dir',
+  'SELECT 1'
+);
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;

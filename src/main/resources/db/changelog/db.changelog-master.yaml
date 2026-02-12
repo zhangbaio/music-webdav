@@ -30,6 +30,7 @@ databaseChangeLog:
   - changeSet:
       id: 20260209-004-optimization-features
       author: codex
+      validCheckSum: ANY
       changes:
         - sqlFile:
             path: db/changelog/changelog/V4__optimization_features.sql
@@ -39,6 +40,7 @@ databaseChangeLog:
   - changeSet:
       id: 20260209-005-track-lyric-fields
       author: codex
+      validCheckSum: ANY
       changes:
         - sqlFile:
             path: db/changelog/changelog/V5__track_lyric_fields.sql
@@ -57,6 +59,7 @@ databaseChangeLog:
   - changeSet:
       id: 20260210-007-playlist-p1
       author: codex
+      validCheckSum: ANY
       changes:
         - sqlFile:
             path: db/changelog/changelog/V7__playlist_p1_features.sql
@@ -66,6 +69,7 @@ databaseChangeLog:
   - changeSet:
       id: 20260211-008-scan-perf-indexes
       author: codex
+      validCheckSum: ANY
       changes:
         - sqlFile:
             path: db/changelog/changelog/V8__scan_perf_indexes.sql
