@@ -100,3 +100,6 @@ app:
     p95-target-ms: 800
     cache-ttl-ms: 5000
     cache-max-entries: 256
+  playback:
+    token-ttl-seconds: 60
+    refresh-before-expiry-seconds: 8

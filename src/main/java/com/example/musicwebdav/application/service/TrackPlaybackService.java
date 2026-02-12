@@ -1,5 +1,7 @@
 package com.example.musicwebdav.application.service;
 
+import com.example.musicwebdav.api.response.PlaybackSessionResponse;
+import com.example.musicwebdav.common.config.AppPlaybackProperties;
 import com.example.musicwebdav.common.config.AppSecurityProperties;
 import com.example.musicwebdav.common.exception.BusinessException;
 import com.example.musicwebdav.common.util.AesCryptoUtil;
@@ -8,15 +10,19 @@ import com.example.musicwebdav.infrastructure.persistence.entity.WebDavConfigEnt
 import com.example.musicwebdav.infrastructure.persistence.mapper.TrackMapper;
 import com.example.musicwebdav.infrastructure.persistence.mapper.WebDavConfigMapper;
 import com.example.musicwebdav.infrastructure.webdav.WebDavClient;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.TimeUnit;
 import javax.servlet.http.HttpServletResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import org.springframework.web.util.UriUtils;
@@ -30,19 +36,62 @@ public class TrackPlaybackService {
     private final WebDavConfigMapper webDavConfigMapper;
     private final WebDavClient webDavClient;
     private final AppSecurityProperties appSecurityProperties;
+    private final PlaybackTokenService playbackTokenService;
+    private final AppPlaybackProperties appPlaybackProperties;
+    private final MeterRegistry meterRegistry;
 
     public TrackPlaybackService(TrackMapper trackMapper,
                                 WebDavConfigMapper webDavConfigMapper,
                                 WebDavClient webDavClient,
-                                AppSecurityProperties appSecurityProperties) {
+                                AppSecurityProperties appSecurityProperties,
+                                PlaybackTokenService playbackTokenService,
+                                AppPlaybackProperties appPlaybackProperties,
+                                ObjectProvider<MeterRegistry> meterRegistryProvider) {
         this.trackMapper = trackMapper;
         this.webDavConfigMapper = webDavConfigMapper;
         this.webDavClient = webDavClient;
         this.appSecurityProperties = appSecurityProperties;
+        this.playbackTokenService = playbackTokenService;
+        this.appPlaybackProperties = appPlaybackProperties;
+        this.meterRegistry = meterRegistryProvider.getIfAvailable();
+    }
+
+    public PlaybackSessionResponse createPlaybackSession(Long trackId, String actor) {
+        long startedAtNanos = System.nanoTime();
+        try {
+            TrackEntity track = trackMapper.selectById(trackId);
+            if (track == null) {
+                throw new BusinessException("404", "歌曲不存在", "请刷新后重试");
+            }
+            PlaybackTokenService.PlaybackTokenIssue tokenIssue =
+                    playbackTokenService.issueTrackStreamToken(actor, trackId);
+            String signedPath = "/api/v1/tracks/" + trackId + "/stream?playbackToken="
+                    + UriUtils.encodeQueryParam(tokenIssue.getToken(), StandardCharsets.UTF_8.name());
+
+            recordPlaybackMetric("music.playback.sign.success", 1, "outcome", "success");
+            logPlaybackAudit("success", actor, trackId, startedAtNanos, null);
+            return new PlaybackSessionResponse(
+                    trackId,
+                    signedPath,
+                    tokenIssue.getIssuedAtEpochSecond(),
+                    tokenIssue.getExpiresAtEpochSecond(),
+                    Math.max(1L, appPlaybackProperties.getRefreshBeforeExpirySeconds())
+            );
+        } catch (BusinessException e) {
+            recordPlaybackMetric("music.playback.sign.failed", 1, "code", safeCode(e.getCode()));
+            logPlaybackAudit("failed", actor, trackId, startedAtNanos, safeCode(e.getCode()));
+            throw e;
+        } catch (Exception e) {
+            recordPlaybackMetric("music.playback.sign.failed", 1, "code", "PLAYBACK_SIGNING_FAILED");
+            logPlaybackAudit("failed", actor, trackId, startedAtNanos, "PLAYBACK_SIGNING_FAILED");
+            throw new BusinessException("PLAYBACK_SIGNING_FAILED", "播放签名服务暂不可用", "请稍后重试");
+        } finally {
+            recordDuration("music.playback.sign.latency", System.nanoTime() - startedAtNanos);
+        }
     }
 
     public void redirectToProxy(Long trackId,
-                                String requestToken,
+                                String playbackToken,
                                 String backendBaseUrl,
                                 HttpServletResponse response) {
         TrackEntity track = trackMapper.selectById(trackId);
@@ -54,8 +103,9 @@ public class TrackPlaybackService {
             normalizedBaseUrl = normalizedBaseUrl.substring(0, normalizedBaseUrl.length() - 1);
         }
         String fileUrl = normalizedBaseUrl + "/api/v1/tracks/" + trackId + "/stream-proxy";
-        if (StringUtils.hasText(requestToken)) {
-            fileUrl = fileUrl + "?token=" + UriUtils.encodeQueryParam(requestToken, StandardCharsets.UTF_8.name());
+        if (StringUtils.hasText(playbackToken)) {
+            fileUrl = fileUrl + "?playbackToken="
+                    + UriUtils.encodeQueryParam(playbackToken, StandardCharsets.UTF_8.name());
         }
         try {
             response.setHeader("Cache-Control", "no-store");
@@ -95,10 +145,12 @@ public class TrackPlaybackService {
                     config.getUsername(), decryptedPassword, streamUrl, response.getOutputStream());
         } catch (IOException e) {
             if (isClientAbort(e)) {
-                log.warn("Client aborted audio stream, trackId={}, streamUrl={}", trackId, streamUrl);
+                log.warn("PLAYBACK_STREAM_ABORTED trackId={} sourcePathHash={} traceId={}",
+                        trackId, summarizePath(track.getSourcePath()), currentTraceId());
                 return;
             }
-            log.error("Failed to proxy audio stream for trackId={}, streamUrl={}", trackId, streamUrl, e);
+            log.error("PLAYBACK_STREAM_PROXY_FAILED trackId={} sourcePathHash={} traceId={}",
+                    trackId, summarizePath(track.getSourcePath()), currentTraceId(), e);
             throw new BusinessException("500", "音频流读取失败：" + e.getMessage());
         }
     }
@@ -139,10 +191,12 @@ public class TrackPlaybackService {
                     coverUrl, response.getOutputStream());
         } catch (IOException e) {
             if (isClientAbort(e)) {
-                log.warn("Client aborted cover stream, trackId={}, coverUrl={}", trackId, coverUrl);
+                log.warn("COVER_STREAM_ABORTED trackId={} coverPathHash={} traceId={}",
+                        trackId, summarizePath(coverArtUrl), currentTraceId());
                 return;
             }
-            log.error("Failed to proxy cover art for trackId={}, coverUrl={}", trackId, coverUrl, e);
+            log.error("COVER_STREAM_FAILED trackId={} coverPathHash={} traceId={}",
+                    trackId, summarizePath(coverArtUrl), currentTraceId(), e);
             throw new BusinessException("500", "封面下载失败：" + e.getMessage());
         }
     }
@@ -173,7 +227,8 @@ public class TrackPlaybackService {
                     lyricUrl, baos);
             return baos.toString(StandardCharsets.UTF_8.name());
         } catch (IOException e) {
-            log.error("Failed to download lyric for trackId={}, lyricUrl={}", trackId, lyricUrl, e);
+            log.error("LYRIC_DOWNLOAD_FAILED trackId={} lyricPathHash={} traceId={}",
+                    trackId, summarizePath(track.getLyricPath()), currentTraceId(), e);
             throw new BusinessException("500", "歌词下载失败：" + e.getMessage());
         }
     }
@@ -252,5 +307,67 @@ public class TrackPlaybackService {
             current = current.getCause();
         }
         return false;
+    }
+
+    private void logPlaybackAudit(String outcome,
+                                  String actor,
+                                  Long trackId,
+                                  long startedAtNanos,
+                                  String reasonCode) {
+        long latencyMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAtNanos);
+        if (reasonCode == null) {
+            log.info("PLAYBACK_SIGN_AUDIT actor={} trackId={} outcome={} latencyMs={} traceId={}",
+                    safeActor(actor), trackId, outcome, latencyMs, currentTraceId());
+        } else {
+            log.warn("PLAYBACK_SIGN_AUDIT actor={} trackId={} outcome={} reasonCode={} latencyMs={} traceId={}",
+                    safeActor(actor), trackId, outcome, reasonCode, latencyMs, currentTraceId());
+        }
+    }
+
+    private String safeActor(String actor) {
+        if (!StringUtils.hasText(actor)) {
+            return "unknown";
+        }
+        String trimmed = actor.trim();
+        return trimmed.length() > 64 ? trimmed.substring(0, 64) : trimmed;
+    }
+
+    private String summarizePath(String path) {
+        if (!StringUtils.hasText(path)) {
+            return "empty";
+        }
+        String normalized = path.trim().toLowerCase(Locale.ROOT);
+        return "len=" + normalized.length() + ",hash=" + Integer.toHexString(normalized.hashCode());
+    }
+
+    private String currentTraceId() {
+        String traceId = MDC.get("requestId");
+        return StringUtils.hasText(traceId) ? traceId : "unknown";
+    }
+
+    private String safeCode(String code) {
+        return StringUtils.hasText(code) ? code : "UNKNOWN";
+    }
+
+    private void recordPlaybackMetric(String name, double value, String... tags) {
+        if (meterRegistry == null || value <= 0) {
+            return;
+        }
+        try {
+            meterRegistry.counter(name, tags).increment(value);
+        } catch (Exception ex) {
+            log.debug("Playback metric counter failed, name={}", name, ex);
+        }
+    }
+
+    private void recordDuration(String name, long nanos) {
+        if (meterRegistry == null || nanos <= 0) {
+            return;
+        }
+        try {
+            meterRegistry.timer(name).record(nanos, TimeUnit.NANOSECONDS);
+        } catch (Exception ex) {
+            log.debug("Playback metric timer failed, name={}", name, ex);
+        }
     }
 }

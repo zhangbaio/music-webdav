@@ -1,6 +1,7 @@
 package com.example.musicwebdav;
 
 import com.example.musicwebdav.common.config.AppAuthProperties;
+import com.example.musicwebdav.common.config.AppPlaybackProperties;
 import com.example.musicwebdav.common.config.AppPlaylistProperties;
 import com.example.musicwebdav.common.config.AppSearchProperties;
 import com.example.musicwebdav.common.config.AppSecurityProperties;
@@ -21,6 +22,7 @@ import org.springframework.scheduling.annotation.EnableScheduling;
         AppWebDavProperties.class,
         AppScanProperties.class,
         AppPlaylistProperties.class,
+        AppPlaybackProperties.class,
         AppSearchProperties.class
 })
 public class MusicWebdavApplication {

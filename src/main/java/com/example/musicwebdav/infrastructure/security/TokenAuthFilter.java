@@ -2,12 +2,15 @@ package com.example.musicwebdav.infrastructure.security;
 
 import com.example.musicwebdav.api.response.ApiResponse;
 import com.example.musicwebdav.application.service.AuthTokenService;
+import com.example.musicwebdav.application.service.PlaybackTokenService;
 import com.example.musicwebdav.common.config.AppSecurityProperties;
 import com.example.musicwebdav.common.exception.BusinessException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import javax.servlet.FilterChain;
 import javax.servlet.ServletException;
 import javax.servlet.http.HttpServletRequest;
@@ -21,15 +24,20 @@ import org.springframework.web.filter.OncePerRequestFilter;
 public class TokenAuthFilter extends OncePerRequestFilter {
 
     private static final String BEARER_PREFIX = "Bearer ";
+    private static final Pattern PLAYBACK_STREAM_URI_PATTERN =
+            Pattern.compile("^/api/v1/tracks/(\\d+)/(stream|stream-proxy)$");
 
     private final AppSecurityProperties properties;
     private final AuthTokenService authTokenService;
+    private final PlaybackTokenService playbackTokenService;
     private final ObjectMapper objectMapper;
 
     public TokenAuthFilter(AppSecurityProperties properties,
-                           AuthTokenService authTokenService) {
+                           AuthTokenService authTokenService,
+                           PlaybackTokenService playbackTokenService) {
         this.properties = properties;
         this.authTokenService = authTokenService;
+        this.playbackTokenService = playbackTokenService;
         this.objectMapper = new ObjectMapper();
     }
 
@@ -51,16 +59,21 @@ public class TokenAuthFilter extends OncePerRequestFilter {
     protected void doFilterInternal(HttpServletRequest request,
                                     HttpServletResponse response,
                                     FilterChain filterChain) throws ServletException, IOException {
-        String requestToken = extractRequestToken(request);
-        if (requestToken == null || requestToken.isEmpty()) {
-            unauthorized(response, "AUTH_MISSING_TOKEN", "缺少 Bearer token", "请先登录");
+        String bearerToken = extractBearerToken(request);
+        String uri = request.getRequestURI();
+        if (bearerToken == null || bearerToken.isEmpty()) {
+            if (!isPlaybackStreamRequest(uri)) {
+                unauthorized(response, "AUTH_MISSING_TOKEN", "缺少 Bearer token", "请先登录");
+                return;
+            }
+            authenticatePlaybackToken(request, response, filterChain);
             return;
         }
 
         String configuredApiToken = properties.getApiToken();
         if (configuredApiToken != null
                 && !configuredApiToken.trim().isEmpty()
-                && configuredApiToken.equals(requestToken)) {
+                && configuredApiToken.equals(bearerToken)) {
             UsernamePasswordAuthenticationToken authentication =
                     new UsernamePasswordAuthenticationToken(
                             "api-client",
@@ -72,7 +85,7 @@ public class TokenAuthFilter extends OncePerRequestFilter {
         }
 
         try {
-            String subject = authTokenService.verifyAccessTokenAndGetSubject(requestToken);
+            String subject = authTokenService.verifyAccessTokenAndGetSubject(bearerToken);
             UsernamePasswordAuthenticationToken authentication =
                     new UsernamePasswordAuthenticationToken(
                             subject,
@@ -85,19 +98,63 @@ public class TokenAuthFilter extends OncePerRequestFilter {
         }
     }
 
-    private String extractRequestToken(HttpServletRequest request) {
+    private void authenticatePlaybackToken(HttpServletRequest request,
+                                           HttpServletResponse response,
+                                           FilterChain filterChain) throws IOException, ServletException {
+        String playbackToken = request.getParameter("playbackToken");
+        if (playbackToken == null || playbackToken.trim().isEmpty()) {
+            unauthorized(response, "PLAYBACK_TOKEN_INVALID", "缺少 playbackToken", "请重试播放");
+            return;
+        }
+
+        Long trackId = resolveTrackId(request.getRequestURI());
+        if (trackId == null || trackId <= 0) {
+            unauthorized(response, "PLAYBACK_TOKEN_INVALID", "播放路径无效", "请重试播放");
+            return;
+        }
+
+        try {
+            String subject = playbackTokenService.verifyTrackStreamTokenAndGetSubject(playbackToken.trim(), trackId);
+            UsernamePasswordAuthenticationToken authentication =
+                    new UsernamePasswordAuthenticationToken(
+                            subject,
+                            null,
+                            Collections.singletonList(new SimpleGrantedAuthority("ROLE_PLAYBACK")));
+            SecurityContextHolder.getContext().setAuthentication(authentication);
+            filterChain.doFilter(request, response);
+        } catch (BusinessException e) {
+            unauthorized(response, e.getCode(), e.getMessage(), e.getUserAction());
+        }
+    }
+
+    private String extractBearerToken(HttpServletRequest request) {
         String authHeader = request.getHeader("Authorization");
         if (authHeader != null && authHeader.startsWith(BEARER_PREFIX)) {
             return authHeader.substring(BEARER_PREFIX.length()).trim();
         }
-        String uri = request.getRequestURI();
-        if (uri != null
-                && uri.startsWith("/api/v1/tracks/")
-                && (uri.endsWith("/stream") || uri.endsWith("/stream-proxy"))) {
-            String tokenInQuery = request.getParameter("token");
-            return tokenInQuery == null ? null : tokenInQuery.trim();
-        }
         return null;
+    }
+
+    private boolean isPlaybackStreamRequest(String uri) {
+        if (uri == null) {
+            return false;
+        }
+        return PLAYBACK_STREAM_URI_PATTERN.matcher(uri).matches();
+    }
+
+    private Long resolveTrackId(String uri) {
+        if (uri == null) {
+            return null;
+        }
+        Matcher matcher = PLAYBACK_STREAM_URI_PATTERN.matcher(uri);
+        if (!matcher.matches()) {
+            return null;
+        }
+        try {
+            return Long.parseLong(matcher.group(1));
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
     }
 
     private void unauthorized(HttpServletResponse response,

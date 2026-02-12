@@ -1,6 +1,7 @@
 package com.example.musicwebdav.api.controller;
 
 import com.example.musicwebdav.api.response.ApiResponse;
+import com.example.musicwebdav.api.response.PlaybackSessionResponse;
 import com.example.musicwebdav.api.response.PageResponse;
 import com.example.musicwebdav.api.response.TrackDetailResponse;
 import com.example.musicwebdav.api.response.TrackResponse;
@@ -10,6 +11,8 @@ import com.example.musicwebdav.application.service.TrackQueryService;
 import java.util.List;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -71,6 +74,11 @@ public class TrackController {
         return ApiResponse.success(response);
     }
 
+    @GetMapping("/{id}/playback-session")
+    public ApiResponse<PlaybackSessionResponse> createPlaybackSession(@PathVariable("id") Long id) {
+        return ApiResponse.success(trackPlaybackService.createPlaybackSession(id, resolveCurrentActor()));
+    }
+
     @GetMapping("/{id}/stream")
     public void streamTrack(@PathVariable("id") Long id,
                             HttpServletRequest request,
@@ -78,7 +86,7 @@ public class TrackController {
         try {
             trackPlaybackService.redirectToProxy(
                     id,
-                    resolveRequestToken(request),
+                    resolvePlaybackToken(request),
                     resolveBackendBaseUrl(request),
                     response);
         } catch (BusinessException e) {
@@ -106,21 +114,21 @@ public class TrackController {
         return ApiResponse.success(content);
     }
 
-    private String resolveRequestToken(HttpServletRequest request) {
-        String queryToken = request.getParameter("token");
-        if (queryToken != null && !queryToken.trim().isEmpty()) {
-            return queryToken.trim();
+    private String resolvePlaybackToken(HttpServletRequest request) {
+        String queryToken = request.getParameter("playbackToken");
+        return queryToken == null ? null : queryToken.trim();
+    }
+
+    private String resolveCurrentActor() {
+        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+        if (authentication == null || authentication.getPrincipal() == null) {
+            return "anonymous";
         }
-        String authorization = request.getHeader("Authorization");
-        if (authorization == null) {
-            return null;
+        String actor = String.valueOf(authentication.getPrincipal());
+        if (actor == null || actor.trim().isEmpty()) {
+            return "anonymous";
         }
-        String bearer = "Bearer ";
-        if (!authorization.startsWith(bearer)) {
-            return null;
-        }
-        String token = authorization.substring(bearer.length()).trim();
-        return token.isEmpty() ? null : token;
+        return actor.trim();
     }
 
     private String resolveBackendBaseUrl(HttpServletRequest request) {

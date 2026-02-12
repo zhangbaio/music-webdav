@@ -1,6 +1,7 @@
 package com.example.musicwebdav.common.config;
 
 import com.example.musicwebdav.application.service.AuthTokenService;
+import com.example.musicwebdav.application.service.PlaybackTokenService;
 import com.example.musicwebdav.common.logging.AccessLogFilter;
 import com.example.musicwebdav.infrastructure.security.TokenAuthFilter;
 import org.springframework.context.annotation.Bean;
@@ -22,8 +23,9 @@ public class SecurityConfig {
 
     @Bean
     public TokenAuthFilter tokenAuthFilter(AppSecurityProperties properties,
-                                           AuthTokenService authTokenService) {
-        return new TokenAuthFilter(properties, authTokenService);
+                                           AuthTokenService authTokenService,
+                                           PlaybackTokenService playbackTokenService) {
+        return new TokenAuthFilter(properties, authTokenService, playbackTokenService);
     }
 
     @Bean
