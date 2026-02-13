@@ -96,3 +96,13 @@ databaseChangeLog:
             relativeToChangelogFile: false
             splitStatements: true
             stripComments: false
+  - changeSet:
+      id: 20260213-011-play-event
+      author: codex
+      validCheckSum: ANY
+      changes:
+        - sqlFile:
+            path: db/changelog/changelog/V11__play_event.sql
+            relativeToChangelogFile: false
+            splitStatements: true
+            stripComments: false
