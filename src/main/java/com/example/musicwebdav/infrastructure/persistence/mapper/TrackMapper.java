@@ -218,4 +218,50 @@ public interface TrackMapper {
     // --- Feature 8: Batch operations (defined in TrackMapper.xml) ---
 
     int batchUpsert(@Param("list") List<TrackEntity> list);
+
+    // --- Recommendation queries ---
+
+    /** Most recently added tracks (by created_at DESC). */
+    @Select("SELECT id, title, artist, album, source_path, duration_sec, has_lyric "
+            + "FROM track WHERE is_deleted = 0 "
+            + "ORDER BY created_at DESC "
+            + "LIMIT #{limit}")
+    List<TrackEntity> selectRecentlyAdded(@Param("limit") int limit);
+
+    /** Most recently added distinct albums (album + artist) with metadata. */
+    @Select("SELECT t.album, t.artist, COUNT(*) AS trackCount, MIN(t.id) AS coverTrackId, MAX(t.`year`) AS `year` "
+            + "FROM track t "
+            + "WHERE t.is_deleted = 0 AND t.album IS NOT NULL AND t.album <> '' "
+            + "GROUP BY t.album, t.artist "
+            + "ORDER BY MAX(t.created_at) DESC "
+            + "LIMIT #{limit}")
+    List<java.util.Map<String, Object>> selectRecentAlbums(@Param("limit") int limit);
+
+    /** Artist info: track count and a representative track ID for cover art. */
+    @Select("SELECT COUNT(*) AS trackCount, MIN(id) AS coverTrackId "
+            + "FROM track WHERE is_deleted = 0 AND artist = #{artist}")
+    java.util.Map<String, Object> selectArtistInfo(@Param("artist") String artist);
+
+    /** Tracks by a specific genre, randomly ordered. */
+    @Select("SELECT id, title, artist, album, source_path, duration_sec, has_lyric "
+            + "FROM track WHERE is_deleted = 0 AND genre = #{genre} "
+            + "ORDER BY RAND() "
+            + "LIMIT #{limit}")
+    List<TrackEntity> selectByGenreRandom(@Param("genre") String genre, @Param("limit") int limit);
+
+    /** Random tracks NOT in the provided ID set (for REDISCOVER shelf). */
+    @Select("<script>"
+            + "SELECT id, title, artist, album, source_path, duration_sec, has_lyric "
+            + "FROM track WHERE is_deleted = 0 "
+            + "<if test='excludeIds != null and excludeIds.size() > 0'>"
+            + " AND id NOT IN "
+            + "<foreach item='eid' collection='excludeIds' open='(' separator=',' close=')'>"
+            + "#{eid}"
+            + "</foreach>"
+            + "</if>"
+            + " ORDER BY RAND() "
+            + " LIMIT #{limit}"
+            + "</script>")
+    List<TrackEntity> selectRandomExcluding(@Param("excludeIds") List<Long> excludeIds,
+                                             @Param("limit") int limit);
 }
