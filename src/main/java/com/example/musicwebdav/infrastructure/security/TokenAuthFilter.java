@@ -193,6 +193,17 @@ public class TokenAuthFilter extends OncePerRequestFilter {
     }
 
     private String sanitizeAuthHeaderValue(String value) {
-        return value.replace("\\", "").replace("\"", "").trim();
+        StringBuilder sb = new StringBuilder(value.length());
+        for (char c : value.toCharArray()) {
+            if (c == '\\' || c == '"') {
+                continue;
+            }
+            if (c > 127) {
+                continue;
+            }
+            sb.append(c);
+        }
+        String result = sb.toString().trim();
+        return result.isEmpty() ? "authentication failed" : result;
     }
 }
