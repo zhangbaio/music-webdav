@@ -75,24 +75,29 @@ public class TrackPlaybackService {
             if (track == null) {
                 throw new BusinessException("404", "歌曲不存在", "请刷新后重试");
             }
-            PlaybackTokenService.PlaybackTokenIssue tokenIssue =
-                    playbackTokenService.issueTrackStreamToken(actor, trackId);
             try {
                 playbackControlService.markTrackStarted(actor, trackId);
             } catch (Exception ex) {
                 log.warn("PLAYBACK_STATE_INIT_FAILED actor={} trackId={} traceId={}",
                         safeActor(actor), trackId, currentTraceId(), ex);
             }
-            String signedPath = "/api/v1/tracks/" + trackId + "/stream?playbackToken="
-                    + UriUtils.encodeQueryParam(tokenIssue.getToken(), StandardCharsets.UTF_8.name());
+
+            // 使用 HMAC 签名的 /stream-signed 端点（支持 Range + Content-Length）
+            // 替代旧的 JWT /stream 端点（不支持 Range，iOS AVPlayer 无法获取 duration）
+            long nowEpoch = System.currentTimeMillis() / 1000;
+            long expireEpoch = nowEpoch + appPlaybackProperties.getTokenTtlSeconds();
+            String signature = PlaybackSignUtil.sign(
+                    appSecurityProperties.getPlaybackSignKey(), trackId, expireEpoch);
+            String signedPath = "/api/v1/tracks/" + trackId
+                    + "/stream-signed?expire=" + expireEpoch + "&sign=" + signature;
 
             recordPlaybackMetric("music.playback.sign.success", 1, "outcome", "success");
             logPlaybackAudit("success", actor, trackId, startedAtNanos, null);
             return new PlaybackSessionResponse(
                     trackId,
                     signedPath,
-                    tokenIssue.getIssuedAtEpochSecond(),
-                    tokenIssue.getExpiresAtEpochSecond(),
+                    nowEpoch,
+                    expireEpoch,
                     Math.max(1L, appPlaybackProperties.getRefreshBeforeExpirySeconds())
             );
         } catch (BusinessException e) {
