@@ -3,6 +3,7 @@ package com.example.musicwebdav.application.service;
 import com.example.musicwebdav.api.response.PlaybackSessionResponse;
 import com.example.musicwebdav.common.config.AppPlaybackProperties;
 import com.example.musicwebdav.common.config.AppSecurityProperties;
+import com.example.musicwebdav.common.config.AppWebDavProperties;
 import com.example.musicwebdav.common.exception.BusinessException;
 import com.example.musicwebdav.common.util.AesCryptoUtil;
 import com.example.musicwebdav.common.util.PlaybackSignUtil;
@@ -25,9 +26,11 @@ import java.util.concurrent.TimeUnit;
 import javax.servlet.http.HttpServletResponse;
 import org.apache.http.Header;
 import org.apache.http.HttpResponse;
-import org.apache.http.client.HttpClient;
+import org.apache.http.client.config.RequestConfig;
 import org.apache.http.client.methods.HttpGet;
+import org.apache.http.impl.client.CloseableHttpClient;
 import org.apache.http.impl.client.HttpClients;
+import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
@@ -49,6 +52,7 @@ public class TrackPlaybackService {
     private final PlaybackControlService playbackControlService;
     private final AppPlaybackProperties appPlaybackProperties;
     private final MeterRegistry meterRegistry;
+    private final CloseableHttpClient streamHttpClient;
 
     public TrackPlaybackService(TrackMapper trackMapper,
                                 WebDavConfigMapper webDavConfigMapper,
@@ -57,6 +61,7 @@ public class TrackPlaybackService {
                                 PlaybackTokenService playbackTokenService,
                                 PlaybackControlService playbackControlService,
                                 AppPlaybackProperties appPlaybackProperties,
+                                AppWebDavProperties appWebDavProperties,
                                 ObjectProvider<MeterRegistry> meterRegistryProvider) {
         this.trackMapper = trackMapper;
         this.webDavConfigMapper = webDavConfigMapper;
@@ -66,6 +71,18 @@ public class TrackPlaybackService {
         this.playbackControlService = playbackControlService;
         this.appPlaybackProperties = appPlaybackProperties;
         this.meterRegistry = meterRegistryProvider.getIfAvailable();
+
+        RequestConfig requestConfig = RequestConfig.custom()
+                .setConnectTimeout(appWebDavProperties.getConnectTimeoutMs())
+                .setSocketTimeout(appWebDavProperties.getSocketTimeoutMs())
+                .build();
+        PoolingHttpClientConnectionManager cm = new PoolingHttpClientConnectionManager();
+        cm.setMaxTotal(20);
+        cm.setDefaultMaxPerRoute(10);
+        this.streamHttpClient = HttpClients.custom()
+                .setConnectionManager(cm)
+                .setDefaultRequestConfig(requestConfig)
+                .build();
     }
 
     public PlaybackSessionResponse createPlaybackSession(Long trackId, String actor) {
@@ -219,10 +236,9 @@ public class TrackPlaybackService {
             httpGet.setHeader("Range", rangeHeader);
         }
 
-        // 4. Execute and stream-forward response
-        HttpClient httpClient = HttpClients.createDefault();
+        // 4. Execute and stream-forward response (reuse pooled client)
         try {
-            HttpResponse webDavResponse = httpClient.execute(httpGet);
+            HttpResponse webDavResponse = streamHttpClient.execute(httpGet);
             int statusCode = webDavResponse.getStatusLine().getStatusCode();
 
             if (statusCode >= 400) {
@@ -245,10 +261,10 @@ public class TrackPlaybackService {
             response.setHeader("Accept-Ranges", "bytes");
             response.setHeader("Cache-Control", "no-store");
 
-            // 5. Stream-forward bytes (8KB buffer, no full buffering)
+            // 5. Stream-forward bytes (64KB buffer for remote network efficiency)
             try (InputStream in = webDavResponse.getEntity().getContent();
                  OutputStream out = response.getOutputStream()) {
-                byte[] buffer = new byte[8192];
+                byte[] buffer = new byte[65536];
                 int len;
                 while ((len = in.read(buffer)) != -1) {
                     out.write(buffer, 0, len);
