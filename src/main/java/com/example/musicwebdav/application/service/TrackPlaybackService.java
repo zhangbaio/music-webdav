@@ -102,7 +102,7 @@ public class TrackPlaybackService {
             // 使用 HMAC 签名的 /stream-signed 端点（支持 Range + Content-Length）
             // 替代旧的 JWT /stream 端点（不支持 Range，iOS AVPlayer 无法获取 duration）
             long nowEpoch = System.currentTimeMillis() / 1000;
-            long expireEpoch = nowEpoch + appPlaybackProperties.getTokenTtlSeconds();
+            long expireEpoch = nowEpoch + appSecurityProperties.getPlaybackSignTtlSec();
             String signature = PlaybackSignUtil.sign(
                     appSecurityProperties.getPlaybackSignKey(), trackId, expireEpoch);
             String signedPath = "/api/v1/tracks/" + trackId
