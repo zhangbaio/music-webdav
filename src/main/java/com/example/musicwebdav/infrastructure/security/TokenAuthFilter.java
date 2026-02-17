@@ -186,13 +186,48 @@ public class TokenAuthFilter extends OncePerRequestFilter {
             error = "invalid_request";
         }
 
-        String description = message == null || message.trim().isEmpty()
-                ? "authentication failed"
-                : sanitizeAuthHeaderValue(message);
+        String description = resolveAuthHeaderDescription(code, message);
         return "Bearer error=\"" + error + "\", error_description=\"" + description + "\"";
     }
 
+    private String resolveAuthHeaderDescription(String code, String message) {
+        if ("AUTH_MISSING_TOKEN".equals(code)) {
+            return "missing bearer token";
+        }
+        if ("PLAYBACK_TOKEN_INVALID".equals(code)) {
+            return "invalid playback token";
+        }
+        if ("AUTH_ACCESS_TOKEN_EXPIRED".equals(code)) {
+            return "access token expired";
+        }
+        if ("AUTH_ACCESS_TOKEN_INVALID".equals(code)) {
+            return "access token invalid";
+        }
+
+        String sanitized = sanitizeAuthHeaderValue(message);
+        if (sanitized.isEmpty()) {
+            return "authentication failed";
+        }
+        return sanitized;
+    }
+
     private String sanitizeAuthHeaderValue(String value) {
-        return value.replace("\\", "").replace("\"", "").trim();
+        if (value == null) {
+            return "";
+        }
+        String cleaned = value.replace("\\", "").replace("\"", "").trim();
+        if (cleaned.isEmpty()) {
+            return "";
+        }
+        StringBuilder builder = new StringBuilder(cleaned.length());
+        for (int i = 0; i < cleaned.length(); i++) {
+            char c = cleaned.charAt(i);
+            if (c >= 0x20 && c <= 0x7E) {
+                builder.append(c);
+            } else {
+                builder.append(' ');
+            }
+        }
+        return builder.toString().replaceAll("\\s+", " ").trim();
     }
 }

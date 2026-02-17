@@ -1,6 +1,7 @@
 package com.example.musicwebdav.api.controller;
 
 import com.example.musicwebdav.api.response.ApiResponse;
+import com.example.musicwebdav.api.response.CoverSessionResponse;
 import com.example.musicwebdav.api.response.PlaybackSessionResponse;
 import com.example.musicwebdav.api.response.PageResponse;
 import com.example.musicwebdav.api.response.TrackDetailResponse;
@@ -78,6 +79,11 @@ public class TrackController {
     @GetMapping("/{id}/playback-session")
     public ApiResponse<PlaybackSessionResponse> createPlaybackSession(@PathVariable("id") Long id) {
         return ApiResponse.success(trackPlaybackService.createPlaybackSession(id, resolveCurrentActor()));
+    }
+
+    @GetMapping("/{id}/cover-session")
+    public ApiResponse<CoverSessionResponse> createCoverSession(@PathVariable("id") Long id) {
+        return ApiResponse.success(trackPlaybackService.createCoverSession(id));
     }
 
     @GetMapping("/{id}/stream")

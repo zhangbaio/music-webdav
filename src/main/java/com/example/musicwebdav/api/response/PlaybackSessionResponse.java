@@ -1,5 +1,6 @@
 package com.example.musicwebdav.api.response;
 
+import java.util.Map;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
@@ -14,4 +15,8 @@ public class PlaybackSessionResponse {
     private Long issuedAtEpochSecond;
     private Long expiresAtEpochSecond;
     private Long refreshBeforeExpirySeconds;
+    private String streamMode;
+    private String directStreamUrl;
+    private Map<String, String> directHeaders;
+    private String fallbackSignedStreamPath;
 }

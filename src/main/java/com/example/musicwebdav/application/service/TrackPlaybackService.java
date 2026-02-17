@@ -1,6 +1,7 @@
 package com.example.musicwebdav.application.service;
 
 import com.example.musicwebdav.api.response.PlaybackSessionResponse;
+import com.example.musicwebdav.api.response.CoverSessionResponse;
 import com.example.musicwebdav.common.config.AppPlaybackProperties;
 import com.example.musicwebdav.common.config.AppSecurityProperties;
 import com.example.musicwebdav.common.exception.BusinessException;
@@ -16,11 +17,15 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import javax.servlet.http.HttpServletResponse;
 import org.apache.http.Header;
@@ -28,6 +33,7 @@ import org.apache.http.HttpResponse;
 import org.apache.http.client.HttpClient;
 import org.apache.http.client.methods.HttpGet;
 import org.apache.http.impl.client.HttpClients;
+import org.apache.http.util.EntityUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
@@ -40,6 +46,7 @@ import org.springframework.web.util.UriUtils;
 public class TrackPlaybackService {
 
     private static final Logger log = LoggerFactory.getLogger(TrackPlaybackService.class);
+    private static final int MAX_REDIRECT_HOPS = 5;
 
     private final TrackMapper trackMapper;
     private final WebDavConfigMapper webDavConfigMapper;
@@ -77,14 +84,36 @@ public class TrackPlaybackService {
             }
             PlaybackTokenService.PlaybackTokenIssue tokenIssue =
                     playbackTokenService.issueTrackStreamToken(actor, trackId);
+            long signedExpire = (System.currentTimeMillis() / 1000L)
+                    + Math.max(60, appSecurityProperties.getPlaybackSignTtlSec());
+            String signature = PlaybackSignUtil.sign(
+                    appSecurityProperties.getPlaybackSignKey(), trackId, signedExpire);
+            String signedPath = "/api/v1/tracks/" + trackId + "/stream-signed?expire="
+                    + signedExpire + "&sign="
+                    + UriUtils.encodeQueryParam(signature, StandardCharsets.UTF_8.name());
+
+            String directStreamUrl = null;
+            Map<String, String> directHeaders = null;
+            if (track.getSourceConfigId() != null && StringUtils.hasText(track.getSourcePath())) {
+                WebDavConfigEntity config = webDavConfigMapper.selectById(track.getSourceConfigId());
+                if (config != null && StringUtils.hasText(config.getUsername())
+                        && StringUtils.hasText(config.getPasswordEnc())) {
+                    String decryptedPassword = AesCryptoUtil.decrypt(
+                            config.getPasswordEnc(), appSecurityProperties.getEncryptKey());
+                    String basicAuth = Base64.getEncoder().encodeToString(
+                            (config.getUsername() + ":" + decryptedPassword).getBytes(StandardCharsets.UTF_8));
+                    directStreamUrl = buildFileUrl(config, track.getSourcePath());
+                    directHeaders = new LinkedHashMap<>();
+                    directHeaders.put("Authorization", "Basic " + basicAuth);
+                }
+            }
+
             try {
                 playbackControlService.markTrackStarted(actor, trackId);
             } catch (Exception ex) {
                 log.warn("PLAYBACK_STATE_INIT_FAILED actor={} trackId={} traceId={}",
                         safeActor(actor), trackId, currentTraceId(), ex);
             }
-            String signedPath = "/api/v1/tracks/" + trackId + "/stream?playbackToken="
-                    + UriUtils.encodeQueryParam(tokenIssue.getToken(), StandardCharsets.UTF_8.name());
 
             recordPlaybackMetric("music.playback.sign.success", 1, "outcome", "success");
             logPlaybackAudit("success", actor, trackId, startedAtNanos, null);
@@ -93,7 +122,11 @@ public class TrackPlaybackService {
                     signedPath,
                     tokenIssue.getIssuedAtEpochSecond(),
                     tokenIssue.getExpiresAtEpochSecond(),
-                    Math.max(1L, appPlaybackProperties.getRefreshBeforeExpirySeconds())
+                    Math.max(1L, appPlaybackProperties.getRefreshBeforeExpirySeconds()),
+                    StringUtils.hasText(directStreamUrl) ? "DIRECT" : "PROXY",
+                    directStreamUrl,
+                    directHeaders,
+                    signedPath
             );
         } catch (BusinessException e) {
             recordPlaybackMetric("music.playback.sign.failed", 1, "code", safeCode(e.getCode()));
@@ -106,6 +139,55 @@ public class TrackPlaybackService {
         } finally {
             recordDuration("music.playback.sign.latency", System.nanoTime() - startedAtNanos);
         }
+    }
+
+    public CoverSessionResponse createCoverSession(Long trackId) {
+        TrackEntity track = trackMapper.selectById(trackId);
+        if (track == null) {
+            throw new BusinessException("404", "歌曲不存在");
+        }
+        if (!StringUtils.hasText(track.getCoverArtUrl())) {
+            throw new BusinessException("404", "封面不存在");
+        }
+        if (track.getSourceConfigId() == null) {
+            throw new BusinessException("500", "歌曲来源配置缺失");
+        }
+
+        WebDavConfigEntity config = webDavConfigMapper.selectById(track.getSourceConfigId());
+        if (config == null) {
+            throw new BusinessException("404", "歌曲来源配置不存在");
+        }
+        if (!StringUtils.hasText(config.getUsername()) || !StringUtils.hasText(config.getPasswordEnc())) {
+            throw new BusinessException("500", "歌曲来源鉴权信息缺失");
+        }
+
+        String coverArtUrl = track.getCoverArtUrl();
+        String lowerUrl = coverArtUrl.toLowerCase(Locale.ROOT);
+        String coverUrl;
+        if (lowerUrl.startsWith("http://") || lowerUrl.startsWith("https://")) {
+            coverUrl = coverArtUrl;
+        } else {
+            coverUrl = buildFileUrl(config, coverArtUrl);
+        }
+
+        String decryptedPassword = AesCryptoUtil.decrypt(
+                config.getPasswordEnc(), appSecurityProperties.getEncryptKey());
+        String basicAuth = Base64.getEncoder().encodeToString(
+                (config.getUsername() + ":" + decryptedPassword).getBytes(StandardCharsets.UTF_8));
+
+        Map<String, String> directHeaders = new LinkedHashMap<>();
+        directHeaders.put("Authorization", "Basic " + basicAuth);
+
+        String fallbackCoverPath = "/api/v1/tracks/" + trackId + "/cover";
+        log.info("COVER_SESSION_ISSUED trackId={} mode=DIRECT target={} fallback={} traceId={}",
+                trackId, summarizeUrl(coverUrl), fallbackCoverPath, currentTraceId());
+        return new CoverSessionResponse(
+                trackId,
+                "DIRECT",
+                coverUrl,
+                directHeaders,
+                fallbackCoverPath
+        );
     }
 
     public void redirectToProxy(Long trackId,
@@ -125,6 +207,8 @@ public class TrackPlaybackService {
             fileUrl = fileUrl + "?playbackToken="
                     + UriUtils.encodeQueryParam(playbackToken, StandardCharsets.UTF_8.name());
         }
+        log.info("PLAYBACK_STREAM_CLIENT_REDIRECT trackId={} location={} hasPlaybackToken={} traceId={}",
+                trackId, summarizeUrl(fileUrl), StringUtils.hasText(playbackToken), currentTraceId());
         try {
             response.setHeader("Cache-Control", "no-store");
             response.sendRedirect(fileUrl);
@@ -200,21 +284,53 @@ public class TrackPlaybackService {
                                            HttpServletResponse response,
                                            String errorLogCode,
                                            String errorMessagePrefix) {
-        HttpGet httpGet = new HttpGet(streamUrl);
-        String basicAuth = Base64.getEncoder().encodeToString(
+        String basicAuth = "Basic " + Base64.getEncoder().encodeToString(
                 (username + ":" + decryptedPassword).getBytes(StandardCharsets.UTF_8));
-        httpGet.setHeader("Authorization", "Basic " + basicAuth);
-        if (StringUtils.hasText(rangeHeader)) {
-            httpGet.setHeader("Range", rangeHeader);
-        }
-
+        String targetUrl = streamUrl;
+        int redirectHops = 0;
         HttpClient httpClient = HttpClients.createDefault();
+        log.info("PLAYBACK_STREAM_PROXY_START trackId={} sourcePathHash={} range={} upstream={} traceId={}",
+                trackId, summarizePath(sourcePath), summarizeRange(rangeHeader), summarizeUrl(streamUrl), currentTraceId());
         try {
-            HttpResponse webDavResponse = httpClient.execute(httpGet);
-            int statusCode = webDavResponse.getStatusLine().getStatusCode();
+            HttpResponse webDavResponse = null;
+            int statusCode = 0;
+            for (int hop = 0; hop <= MAX_REDIRECT_HOPS; hop++) {
+                HttpGet httpGet = new HttpGet(targetUrl);
+                httpGet.setHeader("Authorization", basicAuth);
+                if (StringUtils.hasText(rangeHeader)) {
+                    httpGet.setHeader("Range", rangeHeader);
+                }
+                webDavResponse = httpClient.execute(httpGet);
+                statusCode = webDavResponse.getStatusLine().getStatusCode();
+                if (!isRedirectStatus(statusCode)) {
+                    break;
+                }
+                Header locationHeader = webDavResponse.getFirstHeader("Location");
+                if (locationHeader == null || !StringUtils.hasText(locationHeader.getValue())) {
+                    EntityUtils.consumeQuietly(webDavResponse.getEntity());
+                    throw new BusinessException("502", "WebDAV 返回重定向但缺少 Location");
+                }
+                String redirectedUrl = resolveRedirectUrl(targetUrl, locationHeader.getValue());
+                redirectHops++;
+                log.info("PLAYBACK_STREAM_REDIRECT trackId={} hop={} from={} to={} traceId={}",
+                        trackId, hop + 1, targetUrl, redirectedUrl, currentTraceId());
+                EntityUtils.consumeQuietly(webDavResponse.getEntity());
+                targetUrl = redirectedUrl;
+                if (hop == MAX_REDIRECT_HOPS) {
+                    throw new BusinessException("502", "WebDAV 重定向次数过多");
+                }
+            }
+            if (webDavResponse == null) {
+                throw new BusinessException("500", "WebDAV 音频请求失败：响应为空");
+            }
             if (statusCode >= 400) {
-                log.error("WebDAV returned error status={} for trackId={}, url={}", statusCode, trackId, streamUrl);
+                EntityUtils.consumeQuietly(webDavResponse.getEntity());
+                log.error("WebDAV returned error status={} for trackId={}, url={}", statusCode, trackId, targetUrl);
                 throw new BusinessException(String.valueOf(statusCode), "WebDAV 音频请求失败，状态码: " + statusCode);
+            }
+            if (isRedirectStatus(statusCode)) {
+                EntityUtils.consumeQuietly(webDavResponse.getEntity());
+                throw new BusinessException("502", "WebDAV 重定向未收敛");
             }
 
             response.setStatus(statusCode);
@@ -226,15 +342,21 @@ public class TrackPlaybackService {
             copyHeaderIfPresent(webDavResponse, response, "Content-Range");
             response.setHeader("Accept-Ranges", "bytes");
             response.setHeader("Cache-Control", "no-store");
+            log.info("PLAYBACK_STREAM_PROXY_UPSTREAM_READY trackId={} status={} hops={} target={} traceId={}",
+                    trackId, statusCode, redirectHops, summarizeUrl(targetUrl), currentTraceId());
 
             try (InputStream in = webDavResponse.getEntity().getContent();
                  OutputStream out = response.getOutputStream()) {
                 byte[] buffer = new byte[8192];
                 int len;
+                long bytes = 0L;
                 while ((len = in.read(buffer)) != -1) {
                     out.write(buffer, 0, len);
+                    bytes += len;
                 }
                 out.flush();
+                log.info("PLAYBACK_STREAM_PROXY_SUCCESS trackId={} status={} hops={} bytes={} traceId={}",
+                        trackId, statusCode, redirectHops, bytes, currentTraceId());
             }
         } catch (IOException e) {
             if (isClientAbort(e)) {
@@ -245,6 +367,20 @@ public class TrackPlaybackService {
             log.error("{} trackId={} sourcePathHash={} traceId={}",
                     errorLogCode, trackId, summarizePath(sourcePath), currentTraceId(), e);
             throw new BusinessException("500", errorMessagePrefix + "：" + e.getMessage());
+        }
+    }
+
+    private boolean isRedirectStatus(int statusCode) {
+        return statusCode == 301 || statusCode == 302 || statusCode == 303
+                || statusCode == 307 || statusCode == 308;
+    }
+
+    private String resolveRedirectUrl(String baseUrl, String location) {
+        try {
+            URI base = new URI(baseUrl);
+            return base.resolve(location).toString();
+        } catch (URISyntaxException e) {
+            throw new BusinessException("502", "WebDAV 返回了非法重定向地址");
         }
     }
 
@@ -278,6 +414,9 @@ public class TrackPlaybackService {
         } else {
             coverUrl = buildFileUrl(config, coverArtUrl);
         }
+        String coverMode = (lowerUrl.startsWith("http://") || lowerUrl.startsWith("https://"))
+                ? "ABSOLUTE_URL"
+                : "WEBDAV_PATH";
 
         String decryptedPassword = AesCryptoUtil.decrypt(
                 config.getPasswordEnc(), appSecurityProperties.getEncryptKey());
@@ -285,14 +424,22 @@ public class TrackPlaybackService {
         String contentType = guessImageContentType(coverUrl);
         response.setContentType(contentType);
         response.setHeader("Cache-Control", "public, max-age=86400");
+        log.info("COVER_PROXY_START trackId={} mode={} coverPathHash={} target={} traceId={}",
+                trackId, coverMode, summarizePath(coverArtUrl), summarizeUrl(coverUrl), currentTraceId());
 
+        CountingOutputStream countingOutputStream = null;
         try {
+            countingOutputStream = new CountingOutputStream(response.getOutputStream());
             webDavClient.downloadToOutputStream(config.getUsername(), decryptedPassword,
-                    coverUrl, response.getOutputStream());
+                    coverUrl, countingOutputStream);
+            log.info("COVER_PROXY_SUCCESS trackId={} mode={} bytes={} contentType={} traceId={}",
+                    trackId, coverMode, countingOutputStream.getBytesWritten(), contentType, currentTraceId());
         } catch (IOException e) {
             if (isClientAbort(e)) {
-                log.warn("COVER_STREAM_ABORTED trackId={} coverPathHash={} traceId={}",
-                        trackId, summarizePath(coverArtUrl), currentTraceId());
+                log.warn("COVER_STREAM_ABORTED trackId={} coverPathHash={} mode={} bytes={} traceId={}",
+                        trackId, summarizePath(coverArtUrl), coverMode,
+                        countingOutputStream == null ? 0L : countingOutputStream.getBytesWritten(),
+                        currentTraceId());
                 return;
             }
             log.error("COVER_STREAM_FAILED trackId={} coverPathHash={} traceId={}",
@@ -440,6 +587,34 @@ public class TrackPlaybackService {
         return "len=" + normalized.length() + ",hash=" + Integer.toHexString(normalized.hashCode());
     }
 
+    private String summarizeUrl(String url) {
+        if (!StringUtils.hasText(url)) {
+            return "empty";
+        }
+        String normalized = url.trim();
+        try {
+            URI uri = new URI(normalized);
+            String scheme = uri.getScheme() == null ? "unknown" : uri.getScheme().toLowerCase(Locale.ROOT);
+            String host = uri.getHost();
+            if (!StringUtils.hasText(host)) {
+                host = "unknown";
+            }
+            int port = uri.getPort();
+            String portText = port >= 0 ? String.valueOf(port) : "default";
+            return "scheme=" + scheme + ",host=" + host + ",port=" + portText
+                    + ",pathHash=" + summarizePath(uri.getPath());
+        } catch (Exception ignored) {
+            return summarizePath(normalized);
+        }
+    }
+
+    private String summarizeRange(String rangeHeader) {
+        if (!StringUtils.hasText(rangeHeader)) {
+            return "none";
+        }
+        return summarizePath(rangeHeader);
+    }
+
     private String currentTraceId() {
         String traceId = MDC.get("requestId");
         return StringUtils.hasText(traceId) ? traceId : "unknown";
@@ -468,6 +643,52 @@ public class TrackPlaybackService {
             meterRegistry.timer(name).record(nanos, TimeUnit.NANOSECONDS);
         } catch (Exception ex) {
             log.debug("Playback metric timer failed, name={}", name, ex);
+        }
+    }
+
+    private static final class CountingOutputStream extends OutputStream {
+        private final OutputStream delegate;
+        private long bytesWritten;
+
+        private CountingOutputStream(OutputStream delegate) {
+            this.delegate = delegate;
+            this.bytesWritten = 0L;
+        }
+
+        @Override
+        public void write(int b) throws IOException {
+            delegate.write(b);
+            bytesWritten++;
+        }
+
+        @Override
+        public void write(byte[] b) throws IOException {
+            delegate.write(b);
+            if (b != null) {
+                bytesWritten += b.length;
+            }
+        }
+
+        @Override
+        public void write(byte[] b, int off, int len) throws IOException {
+            delegate.write(b, off, len);
+            if (len > 0) {
+                bytesWritten += len;
+            }
+        }
+
+        @Override
+        public void flush() throws IOException {
+            delegate.flush();
+        }
+
+        @Override
+        public void close() throws IOException {
+            delegate.close();
+        }
+
+        private long getBytesWritten() {
+            return bytesWritten;
         }
     }
 }

@@ -83,8 +83,14 @@ class AuthTokenServiceTest {
     @Test
     void shouldRejectTamperedRefreshToken() {
         AuthTokenResponse login = authTokenService.login("zhangbiao", "secret");
-        String tampered = login.getRefreshToken().substring(0, login.getRefreshToken().length() - 1)
-                + (login.getRefreshToken().endsWith("A") ? "B" : "A");
+        String[] segments = login.getRefreshToken().split("\\.");
+        Assertions.assertEquals(3, segments.length);
+        String payload = segments[1];
+        int mutateIndex = Math.max(0, payload.length() / 2);
+        char current = payload.charAt(mutateIndex);
+        char replacement = current == 'A' ? 'B' : 'A';
+        String tamperedPayload = payload.substring(0, mutateIndex) + replacement + payload.substring(mutateIndex + 1);
+        String tampered = segments[0] + "." + tamperedPayload + "." + segments[2];
 
         BusinessException exception = Assertions.assertThrows(
                 BusinessException.class,

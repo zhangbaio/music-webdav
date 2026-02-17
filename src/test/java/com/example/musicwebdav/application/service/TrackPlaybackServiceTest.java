@@ -55,8 +55,10 @@ class TrackPlaybackServiceTest {
         PlaybackSessionResponse response = service.createPlaybackSession(21L, "demo-user");
 
         assertEquals(21L, response.getTrackId().longValue());
-        assertTrue(response.getSignedStreamPath().contains("/api/v1/tracks/21/stream?playbackToken="));
+        assertTrue(response.getSignedStreamPath().contains("/api/v1/tracks/21/stream-signed?expire="));
         assertEquals(8L, response.getRefreshBeforeExpirySeconds().longValue());
+        assertEquals("PROXY", response.getStreamMode());
+        assertEquals(response.getSignedStreamPath(), response.getFallbackSignedStreamPath());
         verify(playbackControlService).markTrackStarted("demo-user", 21L);
         assertEquals(1.0D, meterRegistry.find("music.playback.sign.success").counter().count());
         assertTrue(meterRegistry.find("music.playback.sign.latency").timer().count() >= 1);

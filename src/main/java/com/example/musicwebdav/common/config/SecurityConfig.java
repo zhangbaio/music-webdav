@@ -45,7 +45,8 @@ public class SecurityConfig {
                         "/music-player.html",
                         "/webdav-manager.html",
                         "/favicon.ico",
-                        "/api/v1/auth/**")
+                        "/api/v1/auth/**",
+                        "/api/v1/tracks/*/stream-signed")
                 .permitAll()
                 .anyRequest().authenticated()
                 .and()
