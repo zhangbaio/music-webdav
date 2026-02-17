@@ -133,7 +133,7 @@ public class TrackPlaybackService {
         }
     }
 
-    public void proxyTrackStream(Long trackId, HttpServletResponse response) {
+    public void proxyTrackStream(Long trackId, String rangeHeader, HttpServletResponse response) {
         TrackEntity track = trackMapper.selectById(trackId);
         if (track == null) {
             throw new BusinessException("404", "歌曲不存在");
@@ -150,27 +150,9 @@ public class TrackPlaybackService {
         String streamUrl = buildFileUrl(config, track.getSourcePath());
         String decryptedPassword = AesCryptoUtil.decrypt(
                 config.getPasswordEnc(), appSecurityProperties.getEncryptKey());
-
-        String mimeType = StringUtils.hasText(track.getMimeType())
-                ? track.getMimeType().trim().toLowerCase(Locale.ROOT)
-                : "application/octet-stream";
-        response.setContentType(mimeType);
-        response.setHeader("Cache-Control", "no-store");
-        response.setHeader("Accept-Ranges", "none");
-
-        try {
-            webDavClient.downloadToOutputStream(
-                    config.getUsername(), decryptedPassword, streamUrl, response.getOutputStream());
-        } catch (IOException e) {
-            if (isClientAbort(e)) {
-                log.warn("PLAYBACK_STREAM_ABORTED trackId={} sourcePathHash={} traceId={}",
-                        trackId, summarizePath(track.getSourcePath()), currentTraceId());
-                return;
-            }
-            log.error("PLAYBACK_STREAM_PROXY_FAILED trackId={} sourcePathHash={} traceId={}",
-                    trackId, summarizePath(track.getSourcePath()), currentTraceId(), e);
-            throw new BusinessException("500", "音频流读取失败：" + e.getMessage());
-        }
+        proxyTrackStreamWithRange(trackId, track.getSourcePath(), track.getMimeType(),
+                config.getUsername(), decryptedPassword, streamUrl, rangeHeader, response,
+                "PLAYBACK_STREAM_PROXY_FAILED", "音频流读取失败");
     }
 
     /**
@@ -203,44 +185,48 @@ public class TrackPlaybackService {
         String streamUrl = buildFileUrl(config, track.getSourcePath());
         String decryptedPassword = AesCryptoUtil.decrypt(
                 config.getPasswordEnc(), appSecurityProperties.getEncryptKey());
+        proxyTrackStreamWithRange(trackId, track.getSourcePath(), track.getMimeType(),
+                config.getUsername(), decryptedPassword, streamUrl, rangeHeader, response,
+                "PLAYBACK_SIGNED_STREAM_PROXY_FAILED", "签名音频流读取失败");
+    }
 
-        // 3. Build WebDAV GET request with Basic Auth and optional Range
+    private void proxyTrackStreamWithRange(Long trackId,
+                                           String sourcePath,
+                                           String mimeTypeRaw,
+                                           String username,
+                                           String decryptedPassword,
+                                           String streamUrl,
+                                           String rangeHeader,
+                                           HttpServletResponse response,
+                                           String errorLogCode,
+                                           String errorMessagePrefix) {
         HttpGet httpGet = new HttpGet(streamUrl);
         String basicAuth = Base64.getEncoder().encodeToString(
-                (config.getUsername() + ":" + decryptedPassword).getBytes(StandardCharsets.UTF_8));
+                (username + ":" + decryptedPassword).getBytes(StandardCharsets.UTF_8));
         httpGet.setHeader("Authorization", "Basic " + basicAuth);
-
         if (StringUtils.hasText(rangeHeader)) {
             httpGet.setHeader("Range", rangeHeader);
         }
 
-        // 4. Execute and stream-forward response
         HttpClient httpClient = HttpClients.createDefault();
         try {
             HttpResponse webDavResponse = httpClient.execute(httpGet);
             int statusCode = webDavResponse.getStatusLine().getStatusCode();
-
             if (statusCode >= 400) {
                 log.error("WebDAV returned error status={} for trackId={}, url={}", statusCode, trackId, streamUrl);
                 throw new BusinessException(String.valueOf(statusCode), "WebDAV 音频请求失败，状态码: " + statusCode);
             }
 
-            // Forward status: 200 (full) or 206 (partial)
             response.setStatus(statusCode);
-
-            // Forward content type
-            String mimeType = StringUtils.hasText(track.getMimeType())
-                    ? track.getMimeType().trim().toLowerCase(Locale.ROOT)
+            String mimeType = StringUtils.hasText(mimeTypeRaw)
+                    ? mimeTypeRaw.trim().toLowerCase(Locale.ROOT)
                     : "application/octet-stream";
             response.setContentType(mimeType);
-
-            // Forward essential headers from WebDAV response
             copyHeaderIfPresent(webDavResponse, response, "Content-Length");
             copyHeaderIfPresent(webDavResponse, response, "Content-Range");
             response.setHeader("Accept-Ranges", "bytes");
             response.setHeader("Cache-Control", "no-store");
 
-            // 5. Stream-forward bytes (8KB buffer, no full buffering)
             try (InputStream in = webDavResponse.getEntity().getContent();
                  OutputStream out = response.getOutputStream()) {
                 byte[] buffer = new byte[8192];
@@ -252,11 +238,13 @@ public class TrackPlaybackService {
             }
         } catch (IOException e) {
             if (isClientAbort(e)) {
-                log.warn("Client aborted signed stream, trackId={}", trackId);
+                log.warn("PLAYBACK_STREAM_ABORTED trackId={} sourcePathHash={} traceId={}",
+                        trackId, summarizePath(sourcePath), currentTraceId());
                 return;
             }
-            log.error("Failed to proxy signed stream for trackId={}, url={}", trackId, streamUrl, e);
-            throw new BusinessException("500", "签名音频流读取失败：" + e.getMessage());
+            log.error("{} trackId={} sourcePathHash={} traceId={}",
+                    errorLogCode, trackId, summarizePath(sourcePath), currentTraceId(), e);
+            throw new BusinessException("500", errorMessagePrefix + "：" + e.getMessage());
         }
     }
 

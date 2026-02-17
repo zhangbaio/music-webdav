@@ -96,9 +96,11 @@ public class TrackController {
     }
 
     @GetMapping("/{id}/stream-proxy")
-    public void streamTrackProxy(@PathVariable("id") Long id, HttpServletResponse response) {
+    public void streamTrackProxy(@PathVariable("id") Long id,
+                                 HttpServletRequest request,
+                                 HttpServletResponse response) {
         try {
-            trackPlaybackService.proxyTrackStream(id, response);
+            trackPlaybackService.proxyTrackStream(id, request.getHeader("Range"), response);
         } catch (BusinessException e) {
             writeStreamError(response, e);
         }
