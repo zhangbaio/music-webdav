@@ -55,6 +55,8 @@ public class RecommendationService {
         tryAdd(shelves, buildHotTracks());
         tryAdd(shelves, buildRecentAdded());
         tryAdd(shelves, buildRecentAlbums());
+        tryAdd(shelves, buildListenAgain());
+        tryAdd(shelves, buildDiscovery());
         tryAdd(shelves, buildFavoriteArtists());
         tryAdd(shelves, buildGenreMix());
         tryAdd(shelves, buildRediscover());
@@ -65,6 +67,36 @@ public class RecommendationService {
     // ------------------------------------------------------------------
     // Individual shelf builders
     // ------------------------------------------------------------------
+
+    private ShelfResponse buildListenAgain() {
+        try {
+            List<TrackEntity> tracks = playEventMapper.selectListenAgain(SHELF_LIMIT);
+            if (tracks.isEmpty()) return null;
+            return ShelfResponse.ofTracks(
+                    ShelfType.LISTEN_AGAIN.name(),
+                    "重温经典",
+                    toTrackResponses(tracks)
+            );
+        } catch (Exception e) {
+            log.warn("Failed to build LISTEN_AGAIN shelf", e);
+            return null;
+        }
+    }
+
+    private ShelfResponse buildDiscovery() {
+        try {
+            List<TrackEntity> tracks = playEventMapper.selectDiscovery(SHELF_LIMIT);
+            if (tracks.isEmpty()) return null;
+            return ShelfResponse.ofTracks(
+                    ShelfType.DISCOVERY.name(),
+                    "发现新音乐",
+                    toTrackResponses(tracks)
+            );
+        } catch (Exception e) {
+            log.warn("Failed to build DISCOVERY shelf", e);
+            return null;
+        }
+    }
 
     private ShelfResponse buildHotTracks() {
         try {

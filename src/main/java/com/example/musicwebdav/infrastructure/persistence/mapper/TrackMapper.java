@@ -86,4 +86,10 @@ public interface TrackMapper {
     /** Random tracks NOT in the provided ID set (for REDISCOVER shelf). */
     List<TrackEntity> selectRandomExcluding(@Param("excludeIds") List<Long> excludeIds,
                                              @Param("limit") int limit);
+
+    List<TrackEntity> selectSmartTracks(@Param("limit") int limit,
+                                        @Param("sortBy") String sortBy,
+                                        @Param("sortOrder") String sortOrder,
+                                        @Param("genre") String genre,
+                                        @Param("artist") String artist);
 }

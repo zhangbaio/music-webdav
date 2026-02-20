@@ -20,6 +20,8 @@ public class PlaylistEntity {
 
     private Integer trackCount;
 
+    private String rules;
+
     private LocalDateTime createdAt;
 
     private LocalDateTime updatedAt;

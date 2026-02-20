@@ -336,4 +336,39 @@
         ORDER BY RAND()
         LIMIT #{limit}
     </select>
+
+    <select id="selectSmartTracks" resultType="TrackEntity">
+        SELECT t.id, t.title, t.artist, t.album, t.source_path, t.duration_sec, t.has_lyric
+        FROM track t
+        <if test="sortBy == 'last_played_at'">
+            LEFT JOIN (
+                SELECT track_id, MAX(created_at) as last_played_at
+                FROM play_event
+                WHERE event_type IN ('PLAY_START', 'PLAY_COMPLETE')
+                GROUP BY track_id
+            ) pe ON t.id = pe.track_id
+        </if>
+        WHERE t.is_deleted = 0
+        <if test="genre != null and genre != ''">
+            AND t.genre = #{genre}
+        </if>
+        <if test="artist != null and artist != ''">
+            AND t.artist = #{artist}
+        </if>
+        ORDER BY
+        <choose>
+            <when test="sortBy == 'title'">t.title</when>
+            <when test="sortBy == 'artist'">t.artist</when>
+            <when test="sortBy == 'album'">t.album</when>
+            <when test="sortBy == 'year'">t.`year`</when>
+            <when test="sortBy == 'created_at'">t.created_at</when>
+            <when test="sortBy == 'last_played_at'">pe.last_played_at</when>
+            <otherwise>t.updated_at</otherwise>
+        </choose>
+        <choose>
+            <when test="sortOrder == 'ASC'"> ASC</when>
+            <otherwise> DESC</otherwise>
+        </choose>
+        LIMIT #{limit}
+    </select>
 </mapper>

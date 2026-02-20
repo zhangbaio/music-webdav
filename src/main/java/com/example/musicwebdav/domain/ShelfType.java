@@ -21,5 +21,11 @@ public enum ShelfType {
     GENRE_MIX,
 
     /** Tracks that haven't been played in a long time. */
-    REDISCOVER
+    REDISCOVER,
+
+    /** Tracks with high play count over all time. */
+    LISTEN_AGAIN,
+
+    /** Tracks from favorite genres/artists that haven't been played recently. */
+    DISCOVERY
 }

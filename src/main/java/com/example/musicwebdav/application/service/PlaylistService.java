@@ -14,6 +14,8 @@ import com.example.musicwebdav.infrastructure.persistence.entity.TrackEntity;
 import com.example.musicwebdav.infrastructure.persistence.mapper.PlaylistMapper;
 import com.example.musicwebdav.infrastructure.persistence.mapper.PlaylistTrackMapper;
 import com.example.musicwebdav.infrastructure.persistence.mapper.TrackMapper;
+import com.example.musicwebdav.domain.model.SmartPlaylistRules;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -22,12 +24,16 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 @Service
 public class PlaylistService {
+
+    private static final Logger log = LoggerFactory.getLogger(PlaylistService.class);
 
     public static final String PLAYLIST_TYPE_NORMAL = "NORMAL";
     public static final String PLAYLIST_TYPE_SYSTEM = "SYSTEM";
@@ -38,13 +44,16 @@ public class PlaylistService {
     private final PlaylistMapper playlistMapper;
     private final PlaylistTrackMapper playlistTrackMapper;
     private final TrackMapper trackMapper;
+    private final ObjectMapper objectMapper;
 
     public PlaylistService(PlaylistMapper playlistMapper,
                            PlaylistTrackMapper playlistTrackMapper,
-                           TrackMapper trackMapper) {
+                           TrackMapper trackMapper,
+                           ObjectMapper objectMapper) {
         this.playlistMapper = playlistMapper;
         this.playlistTrackMapper = playlistTrackMapper;
         this.trackMapper = trackMapper;
+        this.objectMapper = objectMapper;
     }
 
     public List<PlaylistResponse> listPlaylists() {
@@ -341,6 +350,11 @@ public class PlaylistService {
     }
 
     private PageResponse<TrackResponse> doListPlaylistTracks(Long playlistId, int pageNo, int pageSize) {
+        PlaylistEntity playlist = playlistMapper.selectActiveById(playlistId);
+        if (playlist != null && StringUtils.hasText(playlist.getRules())) {
+            return listSmartPlaylistTracks(playlist, pageNo, pageSize);
+        }
+
         int safePageNo = Math.max(1, pageNo);
         int safePageSize = Math.max(1, Math.min(200, pageSize));
         int offset = (safePageNo - 1) * safePageSize;
@@ -351,6 +365,41 @@ public class PlaylistService {
         for (TrackEntity row : rows) {
             records.add(toTrackResponse(row));
         }
+        return new PageResponse<>(records, total, safePageNo, safePageSize);
+    }
+
+    private PageResponse<TrackResponse> listSmartPlaylistTracks(PlaylistEntity playlist, int pageNo, int pageSize) {
+        SmartPlaylistRules rules;
+        try {
+            rules = objectMapper.readValue(playlist.getRules(), SmartPlaylistRules.class);
+        } catch (Exception e) {
+            log.error("Failed to parse smart playlist rules, id={}", playlist.getId(), e);
+            return new PageResponse<>(new ArrayList<>(), 0, pageNo, pageSize);
+        }
+
+        int limit = rules.getLimit() != null ? rules.getLimit() : 100;
+        List<TrackEntity> tracks = trackMapper.selectSmartTracks(
+                limit,
+                rules.getSortBy(),
+                rules.getSortOrder(),
+                rules.getGenre(),
+                rules.getArtist()
+        );
+
+        // Smart playlists are currently not paginated in the DB query (they use limit),
+        // so we manually paginate the result set if needed.
+        int total = tracks.size();
+        int safePageNo = Math.max(1, pageNo);
+        int safePageSize = Math.max(1, Math.min(200, pageSize));
+        int start = (safePageNo - 1) * safePageSize;
+        List<TrackResponse> records = new ArrayList<>();
+        if (start < total) {
+            int end = Math.min(start + safePageSize, total);
+            for (int i = start; i < end; i++) {
+                records.add(toTrackResponse(tracks.get(i)));
+            }
+        }
+
         return new PageResponse<>(records, total, safePageNo, safePageSize);
     }
 
@@ -389,6 +438,7 @@ public class PlaylistService {
                 entity.getSystemCode(),
                 entity.getSortNo(),
                 entity.getTrackCount(),
+                entity.getRules(),
                 entity.getCreatedAt(),
                 entity.getUpdatedAt()
         );

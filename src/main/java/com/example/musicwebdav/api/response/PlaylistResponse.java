@@ -16,6 +16,7 @@ public class PlaylistResponse {
     private String systemCode;
     private Integer sortNo;
     private Integer trackCount;
+    private String rules;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 }

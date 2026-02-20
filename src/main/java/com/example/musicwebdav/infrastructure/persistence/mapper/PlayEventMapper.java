@@ -51,4 +51,14 @@ public interface PlayEventMapper {
      * Count distinct tracks in recently-played stream.
      */
     long countRecentlyPlayedTracks();
+
+    /**
+     * Listen again: tracks with high play count over all time.
+     */
+    List<TrackEntity> selectListenAgain(@Param("limit") int limit);
+
+    /**
+     * Discovery: tracks from favorite genres/artists that haven't been played recently.
+     */
+    List<TrackEntity> selectDiscovery(@Param("limit") int limit);
 }

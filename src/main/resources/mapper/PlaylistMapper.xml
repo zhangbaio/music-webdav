@@ -16,17 +16,17 @@
     </insert>
 
     <select id="selectActiveById" parameterType="long" resultType="PlaylistEntity">
-        SELECT id, name, playlist_type, system_code, sort_no, is_deleted, track_count, created_at, updated_at
+        SELECT id, name, playlist_type, system_code, sort_no, is_deleted, track_count, rules, created_at, updated_at
         FROM playlist WHERE id = #{id} AND is_deleted = 0
     </select>
 
     <select id="selectBySystemCode" parameterType="string" resultType="PlaylistEntity">
-        SELECT id, name, playlist_type, system_code, sort_no, is_deleted, track_count, created_at, updated_at
+        SELECT id, name, playlist_type, system_code, sort_no, is_deleted, track_count, rules, created_at, updated_at
         FROM playlist WHERE system_code = #{systemCode} AND is_deleted = 0 LIMIT 1
     </select>
 
     <select id="selectAllActive" resultType="PlaylistEntity">
-        SELECT id, name, playlist_type, system_code, sort_no, is_deleted, track_count, created_at, updated_at
+        SELECT id, name, playlist_type, system_code, sort_no, is_deleted, track_count, rules, created_at, updated_at
         FROM playlist WHERE is_deleted = 0
         ORDER BY CASE WHEN playlist_type = 'SYSTEM' THEN 0 ELSE 1 END, sort_no ASC, updated_at DESC, id DESC
     </select>
