@@ -118,9 +118,19 @@ databaseChangeLog:
   - changeSet:
       id: 20260220-013-user-system
       author: codex
+      validCheckSum: ANY
       changes:
         - sqlFile:
             path: db/changelog/changelog/V13__add_user_system.sql
+            relativeToChangelogFile: false
+            splitStatements: true
+            stripComments: false
+  - changeSet:
+      id: 20260220-014-fix-admin-password
+      author: codex
+      changes:
+        - sqlFile:
+            path: db/changelog/changelog/V14__fix_admin_password.sql
             relativeToChangelogFile: false
             splitStatements: true
             stripComments: false
