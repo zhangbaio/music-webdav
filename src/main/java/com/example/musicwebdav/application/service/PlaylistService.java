@@ -12,9 +12,22 @@ import com.example.musicwebdav.infrastructure.persistence.entity.PlaylistEntity;
 import com.example.musicwebdav.infrastructure.persistence.entity.PlaylistTrackEntity;
 import com.example.musicwebdav.infrastructure.persistence.entity.TrackEntity;
 import com.example.musicwebdav.infrastructure.persistence.mapper.PlaylistMapper;
+import com.example.musicwebdav.api.response.AddPlaylistTracksResponse;
+import com.example.musicwebdav.api.response.PageResponse;
+import com.example.musicwebdav.api.response.PlaylistCleanupResponse;
+import com.example.musicwebdav.api.response.PlaylistResponse;
+import com.example.musicwebdav.api.response.PlaylistTrackOperationResponse;
+import com.example.musicwebdav.api.response.PlaylistTrackOrderResponse;
+import com.example.musicwebdav.api.response.TrackResponse;
+import com.example.musicwebdav.common.exception.BusinessException;
+import com.example.musicwebdav.infrastructure.persistence.entity.PlaylistEntity;
+import com.example.musicwebdav.infrastructure.persistence.entity.PlaylistTrackEntity;
+import com.example.musicwebdav.infrastructure.persistence.entity.TrackEntity;
+import com.example.musicwebdav.infrastructure.persistence.mapper.PlaylistMapper;
 import com.example.musicwebdav.infrastructure.persistence.mapper.PlaylistTrackMapper;
 import com.example.musicwebdav.infrastructure.persistence.mapper.TrackMapper;
 import com.example.musicwebdav.domain.model.SmartPlaylistRules;
+import com.example.musicwebdav.common.security.SecurityUtil;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -57,19 +70,22 @@ public class PlaylistService {
     }
 
     public List<PlaylistResponse> listPlaylists() {
-        ensureFavoritesPlaylistExists();
-        return playlistMapper.selectAllActive().stream().map(this::toResponse).collect(Collectors.toList());
+        Long userId = SecurityUtil.getCurrentUserId();
+        ensureFavoritesPlaylistExists(userId);
+        return playlistMapper.selectAllActive(userId).stream().map(this::toResponse).collect(Collectors.toList());
     }
 
     @Transactional(rollbackFor = Exception.class)
     public PlaylistResponse createPlaylist(String name) {
+        Long userId = SecurityUtil.getCurrentUserId();
         String safeName = normalizePlaylistName(name);
-        if (playlistMapper.countByName(safeName) > 0) {
+        if (playlistMapper.countByName(userId, safeName) > 0) {
             throw new BusinessException("409", "歌单已存在");
         }
-        Integer maxSortNo = playlistMapper.selectMaxSortNoOfNormal();
+        Integer maxSortNo = playlistMapper.selectMaxSortNoOfNormal(userId);
         int sortNo = (maxSortNo == null ? 0 : maxSortNo) + SORT_STEP;
         PlaylistEntity entity = new PlaylistEntity();
+        entity.setUserId(userId);
         entity.setName(safeName);
         entity.setPlaylistType(PLAYLIST_TYPE_NORMAL);
         entity.setSystemCode(null);
@@ -77,48 +93,52 @@ public class PlaylistService {
         entity.setIsDeleted(0);
         entity.setTrackCount(0);
         playlistMapper.insert(entity);
-        PlaylistEntity created = playlistMapper.selectActiveById(entity.getId());
+        PlaylistEntity created = playlistMapper.selectActiveById(entity.getId(), userId);
         return toResponse(created);
     }
 
     @Transactional(rollbackFor = Exception.class)
     public PlaylistResponse renamePlaylist(Long playlistId, String name) {
-        PlaylistEntity playlist = requirePlaylist(playlistId);
+        Long userId = SecurityUtil.getCurrentUserId();
+        PlaylistEntity playlist = requirePlaylist(playlistId, userId);
         if (!PLAYLIST_TYPE_NORMAL.equals(playlist.getPlaylistType())) {
             throw new BusinessException("400", "系统歌单不支持重命名");
         }
         String safeName = normalizePlaylistName(name);
-        if (!safeName.equals(playlist.getName()) && playlistMapper.countByName(safeName) > 0) {
+        if (!safeName.equals(playlist.getName()) && playlistMapper.countByName(userId, safeName) > 0) {
             throw new BusinessException("409", "歌单已存在");
         }
-        int updated = playlistMapper.renameNormal(playlistId, safeName);
+        int updated = playlistMapper.renameNormal(playlistId, userId, safeName);
         if (updated <= 0) {
             throw new BusinessException("404", "歌单不存在");
         }
-        return toResponse(playlistMapper.selectActiveById(playlistId));
+        return toResponse(playlistMapper.selectActiveById(playlistId, userId));
     }
 
     @Transactional(rollbackFor = Exception.class)
     public void deletePlaylist(Long playlistId) {
-        PlaylistEntity playlist = requirePlaylist(playlistId);
+        Long userId = SecurityUtil.getCurrentUserId();
+        PlaylistEntity playlist = requirePlaylist(playlistId, userId);
         if (!PLAYLIST_TYPE_NORMAL.equals(playlist.getPlaylistType())) {
             throw new BusinessException("400", "系统歌单不支持删除");
         }
         playlistTrackMapper.deleteByPlaylistId(playlistId);
-        int updated = playlistMapper.softDeleteNormal(playlistId);
+        int updated = playlistMapper.softDeleteNormal(playlistId, userId);
         if (updated <= 0) {
             throw new BusinessException("404", "歌单不存在");
         }
     }
 
     public PageResponse<TrackResponse> listPlaylistTracks(Long playlistId, int pageNo, int pageSize) {
-        requirePlaylist(playlistId);
-        return doListPlaylistTracks(playlistId, pageNo, pageSize);
+        Long userId = SecurityUtil.getCurrentUserId();
+        requirePlaylist(playlistId, userId);
+        return doListPlaylistTracks(playlistId, pageNo, pageSize, userId);
     }
 
     @Transactional(rollbackFor = Exception.class)
     public AddPlaylistTracksResponse addTracks(Long playlistId, List<Long> trackIds) {
-        requirePlaylist(playlistId);
+        Long userId = SecurityUtil.getCurrentUserId();
+        requirePlaylist(playlistId, userId);
         List<Long> uniqueTrackIds = normalizeIdList(trackIds, "trackIds");
 
         Integer maxOrderNo = playlistTrackMapper.selectMaxOrderNo(playlistId);
@@ -140,7 +160,7 @@ public class PlaylistService {
         }
 
         playlistMapper.refreshTrackCount(playlistId);
-        PlaylistEntity playlist = playlistMapper.selectActiveById(playlistId);
+        PlaylistEntity playlist = playlistMapper.selectActiveById(playlistId, userId);
         int trackCount = playlist == null || playlist.getTrackCount() == null ? 0 : playlist.getTrackCount();
         return new AddPlaylistTracksResponse(
                 playlistId,
@@ -162,14 +182,15 @@ public class PlaylistService {
 
     @Transactional(rollbackFor = Exception.class)
     public PlaylistTrackOperationResponse removeTracks(Long playlistId, List<Long> trackIds) {
-        requirePlaylist(playlistId);
+        Long userId = SecurityUtil.getCurrentUserId();
+        requirePlaylist(playlistId, userId);
         List<Long> uniqueTrackIds = normalizeIdList(trackIds, "trackIds");
         int affected = playlistTrackMapper.batchDeleteByPlaylistAndTrackIds(playlistId, uniqueTrackIds);
         if (affected > 0) {
             normalizeTrackOrderNo(playlistId);
         }
         playlistMapper.refreshTrackCount(playlistId);
-        PlaylistEntity playlist = playlistMapper.selectActiveById(playlistId);
+        PlaylistEntity playlist = playlistMapper.selectActiveById(playlistId, userId);
         int trackCount = playlist == null || playlist.getTrackCount() == null ? 0 : playlist.getTrackCount();
         return new PlaylistTrackOperationResponse(
                 playlistId,
@@ -182,9 +203,10 @@ public class PlaylistService {
 
     @Transactional(rollbackFor = Exception.class)
     public List<PlaylistResponse> reorderPlaylists(List<Long> playlistIds) {
-        ensureFavoritesPlaylistExists();
+        Long userId = SecurityUtil.getCurrentUserId();
+        ensureFavoritesPlaylistExists(userId);
         List<Long> orderedPlaylistIds = normalizeIdList(playlistIds, "playlistIds");
-        List<PlaylistEntity> activePlaylists = playlistMapper.selectAllActive();
+        List<PlaylistEntity> activePlaylists = playlistMapper.selectAllActive(userId);
         List<PlaylistEntity> normalPlaylists = new ArrayList<>();
         Map<Long, PlaylistEntity> normalById = new HashMap<>();
         for (PlaylistEntity entity : activePlaylists) {
@@ -218,7 +240,7 @@ public class PlaylistService {
         for (Long playlistId : finalOrder) {
             PlaylistEntity current = normalById.get(playlistId);
             if (current.getSortNo() == null || current.getSortNo() != sortNo) {
-                playlistMapper.updateSortNoNormal(playlistId, sortNo);
+                playlistMapper.updateSortNoNormal(playlistId, userId, sortNo);
             }
             sortNo += SORT_STEP;
         }
@@ -227,7 +249,8 @@ public class PlaylistService {
 
     @Transactional(rollbackFor = Exception.class)
     public PlaylistTrackOrderResponse reorderTracks(Long playlistId, List<Long> trackIds) {
-        requirePlaylist(playlistId);
+        Long userId = SecurityUtil.getCurrentUserId();
+        requirePlaylist(playlistId, userId);
         List<PlaylistTrackEntity> relations = playlistTrackMapper.selectByPlaylistIdOrdered(playlistId);
         if (relations.isEmpty()) {
             return new PlaylistTrackOrderResponse(playlistId, 0, 0);
@@ -279,7 +302,8 @@ public class PlaylistService {
 
         int normalizedPlaylistCount = 0;
         if (normalizeOrderNo) {
-            List<Long> playlistIds = playlistMapper.selectAllActiveIds();
+            Long userId = SecurityUtil.getCurrentUserId();
+            List<Long> playlistIds = playlistMapper.selectAllActiveIds(userId);
             for (Long playlistId : playlistIds) {
                 int changed = normalizeTrackOrderNo(playlistId);
                 if (changed > 0) {
@@ -302,13 +326,15 @@ public class PlaylistService {
     }
 
     public Long getOrCreateFavoritesPlaylistId() {
-        PlaylistEntity favorites = ensureFavoritesPlaylistExists();
+        Long userId = SecurityUtil.getCurrentUserId();
+        PlaylistEntity favorites = ensureFavoritesPlaylistExists(userId);
         return favorites.getId();
     }
 
     public PageResponse<TrackResponse> listFavoriteTracks(int pageNo, int pageSize) {
+        Long userId = SecurityUtil.getCurrentUserId();
         Long playlistId = getOrCreateFavoritesPlaylistId();
-        return doListPlaylistTracks(playlistId, pageNo, pageSize);
+        return doListPlaylistTracks(playlistId, pageNo, pageSize, userId);
     }
 
     private int normalizeTrackOrderNo(Long playlistId) {
@@ -328,31 +354,31 @@ public class PlaylistService {
         return updatedCount;
     }
 
-    private PlaylistEntity requirePlaylist(Long playlistId) {
-        PlaylistEntity playlist = playlistMapper.selectActiveById(playlistId);
+    private PlaylistEntity requirePlaylist(Long playlistId, Long userId) {
+        PlaylistEntity playlist = playlistMapper.selectActiveById(playlistId, userId);
         if (playlist == null) {
             throw new BusinessException("404", "歌单不存在");
         }
         return playlist;
     }
 
-    private PlaylistEntity ensureFavoritesPlaylistExists() {
-        PlaylistEntity playlist = playlistMapper.selectBySystemCode(SYSTEM_CODE_FAVORITES);
+    private PlaylistEntity ensureFavoritesPlaylistExists(Long userId) {
+        PlaylistEntity playlist = playlistMapper.selectBySystemCode(userId, SYSTEM_CODE_FAVORITES);
         if (playlist != null) {
             return playlist;
         }
-        playlistMapper.insertSystemIfAbsent(SYSTEM_NAME_FAVORITES, SYSTEM_CODE_FAVORITES);
-        playlist = playlistMapper.selectBySystemCode(SYSTEM_CODE_FAVORITES);
+        playlistMapper.insertSystemIfAbsent(userId, SYSTEM_NAME_FAVORITES, SYSTEM_CODE_FAVORITES);
+        playlist = playlistMapper.selectBySystemCode(userId, SYSTEM_CODE_FAVORITES);
         if (playlist == null) {
             throw new BusinessException("500", "初始化收藏歌单失败");
         }
         return playlist;
     }
 
-    private PageResponse<TrackResponse> doListPlaylistTracks(Long playlistId, int pageNo, int pageSize) {
-        PlaylistEntity playlist = playlistMapper.selectActiveById(playlistId);
+    private PageResponse<TrackResponse> doListPlaylistTracks(Long playlistId, int pageNo, int pageSize, Long userId) {
+        PlaylistEntity playlist = playlistMapper.selectActiveById(playlistId, userId);
         if (playlist != null && StringUtils.hasText(playlist.getRules())) {
-            return listSmartPlaylistTracks(playlist, pageNo, pageSize);
+            return listSmartPlaylistTracks(playlist, pageNo, pageSize, userId);
         }
 
         int safePageNo = Math.max(1, pageNo);
@@ -368,7 +394,7 @@ public class PlaylistService {
         return new PageResponse<>(records, total, safePageNo, safePageSize);
     }
 
-    private PageResponse<TrackResponse> listSmartPlaylistTracks(PlaylistEntity playlist, int pageNo, int pageSize) {
+    private PageResponse<TrackResponse> listSmartPlaylistTracks(PlaylistEntity playlist, int pageNo, int pageSize, Long userId) {
         SmartPlaylistRules rules;
         try {
             rules = objectMapper.readValue(playlist.getRules(), SmartPlaylistRules.class);

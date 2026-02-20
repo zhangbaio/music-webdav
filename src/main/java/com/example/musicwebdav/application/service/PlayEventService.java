@@ -6,6 +6,7 @@ import com.example.musicwebdav.domain.PlayEventType;
 import com.example.musicwebdav.infrastructure.persistence.entity.PlayEventEntity;
 import com.example.musicwebdav.infrastructure.persistence.entity.TrackEntity;
 import com.example.musicwebdav.infrastructure.persistence.mapper.PlayEventMapper;
+import com.example.musicwebdav.common.security.SecurityUtil;
 import java.util.ArrayList;
 import java.util.List;
 import org.slf4j.Logger;
@@ -36,23 +37,26 @@ public class PlayEventService {
             return;
         }
 
+        Long userId = SecurityUtil.getCurrentUserId();
         PlayEventEntity entity = new PlayEventEntity();
         entity.setTrackId(trackId);
+        entity.setUserId(userId);
         entity.setEventType(eventType.name());
         entity.setDurationSec(Math.max(0, durationSec));
 
         playEventMapper.insert(entity);
 
-        log.debug("Recorded play event: trackId={}, type={}, durationSec={}",
-                trackId, eventType, durationSec);
+        log.debug("Recorded play event: userId={}, trackId={}, type={}, durationSec={}",
+                userId, trackId, eventType, durationSec);
     }
 
     public PageResponse<TrackResponse> listRecentlyPlayedTracks(int pageNo, int pageSize) {
+        Long userId = SecurityUtil.getCurrentUserId();
         int safePageNo = Math.max(1, pageNo);
         int safePageSize = Math.max(1, Math.min(200, pageSize));
         int offset = (safePageNo - 1) * safePageSize;
 
-        List<TrackEntity> entities = playEventMapper.selectRecentlyPlayedTracks(offset, safePageSize);
+        List<TrackEntity> entities = playEventMapper.selectRecentlyPlayedTracks(offset, safePageSize, userId);
         List<TrackResponse> records = new ArrayList<>(entities.size());
         for (TrackEntity e : entities) {
             records.add(new TrackResponse(
@@ -66,7 +70,7 @@ public class PlayEventService {
             ));
         }
 
-        long total = playEventMapper.countRecentlyPlayedTracks();
+        long total = playEventMapper.countRecentlyPlayedTracks(userId);
         return new PageResponse<>(records, total, safePageNo, safePageSize);
     }
 }

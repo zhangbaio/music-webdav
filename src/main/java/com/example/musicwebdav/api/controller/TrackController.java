@@ -11,6 +11,7 @@ import com.example.musicwebdav.common.exception.BusinessException;
 import com.example.musicwebdav.application.service.TrackPlaybackService;
 import com.example.musicwebdav.application.service.TrackQueryService;
 import com.example.musicwebdav.application.service.TrackUpdateService;
+import com.example.musicwebdav.common.security.UserPrincipal;
 import java.util.List;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -161,14 +162,10 @@ public class TrackController {
 
     private String resolveCurrentActor() {
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
-        if (authentication == null || authentication.getPrincipal() == null) {
-            return "anonymous";
+        if (authentication != null && authentication.getPrincipal() instanceof UserPrincipal) {
+            return String.valueOf(((UserPrincipal) authentication.getPrincipal()).getId());
         }
-        String actor = String.valueOf(authentication.getPrincipal());
-        if (actor == null || actor.trim().isEmpty()) {
-            return "anonymous";
-        }
-        return actor.trim();
+        return "anonymous";
     }
 
     private String resolveBackendBaseUrl(HttpServletRequest request) {

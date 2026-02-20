@@ -115,3 +115,12 @@ databaseChangeLog:
             relativeToChangelogFile: false
             splitStatements: true
             stripComments: false
+  - changeSet:
+      id: 20260220-013-user-system
+      author: codex
+      changes:
+        - sqlFile:
+            path: db/changelog/changelog/V13__add_user_system.sql
+            relativeToChangelogFile: false
+            splitStatements: true
+            stripComments: false

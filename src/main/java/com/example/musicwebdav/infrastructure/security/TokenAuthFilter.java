@@ -5,6 +5,8 @@ import com.example.musicwebdav.application.service.AuthTokenService;
 import com.example.musicwebdav.application.service.PlaybackTokenService;
 import com.example.musicwebdav.common.config.AppSecurityProperties;
 import com.example.musicwebdav.common.exception.BusinessException;
+import com.example.musicwebdav.common.security.UserPrincipal;
+import com.example.musicwebdav.common.util.JwtUtil;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -31,14 +33,17 @@ public class TokenAuthFilter extends OncePerRequestFilter {
     private final AuthTokenService authTokenService;
     private final PlaybackTokenService playbackTokenService;
     private final ObjectMapper objectMapper;
+    private final JwtUtil jwtUtil;
 
     public TokenAuthFilter(AppSecurityProperties properties,
                            AuthTokenService authTokenService,
-                           PlaybackTokenService playbackTokenService) {
+                           PlaybackTokenService playbackTokenService,
+                           JwtUtil jwtUtil) {
         this.properties = properties;
         this.authTokenService = authTokenService;
         this.playbackTokenService = playbackTokenService;
         this.objectMapper = new ObjectMapper();
+        this.jwtUtil = jwtUtil;
     }
 
     @Override
@@ -79,31 +84,42 @@ public class TokenAuthFilter extends OncePerRequestFilter {
             return;
         }
 
+        // Support Legacy static token for API clients if configured
         String configuredApiToken = properties.getApiToken();
         if (configuredApiToken != null
                 && !configuredApiToken.trim().isEmpty()
                 && configuredApiToken.equals(bearerToken)) {
+            UserPrincipal principal = new UserPrincipal(1L, "api-client", "", "API");
             UsernamePasswordAuthenticationToken authentication =
                     new UsernamePasswordAuthenticationToken(
-                            "api-client",
+                            principal,
                             null,
-                            Collections.singletonList(new SimpleGrantedAuthority("ROLE_API")));
+                            principal.getAuthorities());
             SecurityContextHolder.getContext().setAuthentication(authentication);
             filterChain.doFilter(request, response);
             return;
         }
 
+        // Verify JWT Token
         try {
-            String subject = authTokenService.verifyAccessTokenAndGetSubject(bearerToken);
+            if (!jwtUtil.validateToken(bearerToken)) {
+                unauthorized(response, "AUTH_ACCESS_TOKEN_INVALID", "Token 无效或已过期", "请重新登录");
+                return;
+            }
+            Long userId = jwtUtil.getUserId(bearerToken);
+            String username = jwtUtil.getUsername(bearerToken);
+            
+            // For now, we assume role USER. In real app, load from DB or JWT claims.
+            UserPrincipal principal = new UserPrincipal(userId, username, "", "USER");
             UsernamePasswordAuthenticationToken authentication =
                     new UsernamePasswordAuthenticationToken(
-                            subject,
+                            principal,
                             null,
-                            Collections.singletonList(new SimpleGrantedAuthority("ROLE_USER")));
+                            principal.getAuthorities());
             SecurityContextHolder.getContext().setAuthentication(authentication);
             filterChain.doFilter(request, response);
-        } catch (BusinessException e) {
-            unauthorized(response, e.getCode(), e.getMessage(), e.getUserAction());
+        } catch (Exception e) {
+            unauthorized(response, "AUTH_ACCESS_TOKEN_INVALID", "Token 校验失败: " + e.getMessage(), "请重新登录");
         }
     }
 

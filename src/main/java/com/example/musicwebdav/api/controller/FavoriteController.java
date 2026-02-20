@@ -6,6 +6,7 @@ import com.example.musicwebdav.api.response.FavoriteStatusResponse;
 import com.example.musicwebdav.api.response.PageResponse;
 import com.example.musicwebdav.api.response.TrackResponse;
 import com.example.musicwebdav.application.service.FavoriteService;
+import com.example.musicwebdav.common.security.UserPrincipal;
 import javax.validation.Valid;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
@@ -66,13 +67,9 @@ public class FavoriteController {
 
     private String resolveCurrentActor() {
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
-        if (authentication == null || authentication.getPrincipal() == null) {
-            return "anonymous";
+        if (authentication != null && authentication.getPrincipal() instanceof UserPrincipal) {
+            return String.valueOf(((UserPrincipal) authentication.getPrincipal()).getId());
         }
-        String actor = String.valueOf(authentication.getPrincipal());
-        if (actor == null || actor.trim().isEmpty()) {
-            return "anonymous";
-        }
-        return actor.trim();
+        return "anonymous";
     }
 }

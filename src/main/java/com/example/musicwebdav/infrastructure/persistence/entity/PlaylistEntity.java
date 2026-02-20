@@ -8,6 +8,8 @@ public class PlaylistEntity {
 
     private Long id;
 
+    private Long userId;
+
     private String name;
 
     private String playlistType;

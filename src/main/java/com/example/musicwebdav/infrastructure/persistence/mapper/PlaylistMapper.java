@@ -10,25 +10,25 @@ public interface PlaylistMapper {
 
     int insert(PlaylistEntity entity);
 
-    int insertSystemIfAbsent(@Param("name") String name, @Param("systemCode") String systemCode);
+    int insertSystemIfAbsent(@Param("userId") Long userId, @Param("name") String name, @Param("systemCode") String systemCode);
 
-    PlaylistEntity selectActiveById(@Param("id") Long id);
+    PlaylistEntity selectActiveById(@Param("id") Long id, @Param("userId") Long userId);
 
-    PlaylistEntity selectBySystemCode(@Param("systemCode") String systemCode);
+    PlaylistEntity selectBySystemCode(@Param("userId") Long userId, @Param("systemCode") String systemCode);
 
-    List<PlaylistEntity> selectAllActive();
+    List<PlaylistEntity> selectAllActive(@Param("userId") Long userId);
 
-    List<Long> selectAllActiveIds();
+    List<Long> selectAllActiveIds(@Param("userId") Long userId);
 
-    Integer selectMaxSortNoOfNormal();
+    Integer selectMaxSortNoOfNormal(@Param("userId") Long userId);
 
-    int countByName(@Param("name") String name);
+    int countByName(@Param("userId") Long userId, @Param("name") String name);
 
-    int renameNormal(@Param("id") Long id, @Param("name") String name);
+    int renameNormal(@Param("id") Long id, @Param("userId") Long userId, @Param("name") String name);
 
-    int softDeleteNormal(@Param("id") Long id);
+    int softDeleteNormal(@Param("id") Long id, @Param("userId") Long userId);
 
-    int updateSortNoNormal(@Param("id") Long id, @Param("sortNo") Integer sortNo);
+    int updateSortNoNormal(@Param("id") Long id, @Param("userId") Long userId, @Param("sortNo") Integer sortNo);
 
     int touchUpdatedAt(@Param("id") Long id);
 

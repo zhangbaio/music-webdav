@@ -5,58 +5,58 @@
 <mapper namespace="com.example.musicwebdav.infrastructure.persistence.mapper.PlaylistMapper">
 
     <insert id="insert" parameterType="PlaylistEntity" useGeneratedKeys="true" keyProperty="id">
-        INSERT INTO playlist(name, playlist_type, system_code, is_deleted, track_count, sort_no)
-        VALUES(#{name}, #{playlistType}, #{systemCode}, #{isDeleted}, #{trackCount}, #{sortNo})
+        INSERT INTO playlist(user_id, name, playlist_type, system_code, is_deleted, track_count, sort_no, rules)
+        VALUES(#{userId}, #{name}, #{playlistType}, #{systemCode}, #{isDeleted}, #{trackCount}, #{sortNo}, #{rules})
     </insert>
 
     <insert id="insertSystemIfAbsent">
-        INSERT INTO playlist(name, playlist_type, system_code, is_deleted, track_count, sort_no)
-        SELECT #{name}, 'SYSTEM', #{systemCode}, 0, 0, 0
-        WHERE NOT EXISTS (SELECT 1 FROM playlist WHERE system_code = #{systemCode} AND is_deleted = 0)
+        INSERT INTO playlist(user_id, name, playlist_type, system_code, is_deleted, track_count, sort_no)
+        SELECT #{userId}, #{name}, 'SYSTEM', #{systemCode}, 0, 0, 0
+        WHERE NOT EXISTS (SELECT 1 FROM playlist WHERE user_id = #{userId} AND system_code = #{systemCode} AND is_deleted = 0)
     </insert>
 
-    <select id="selectActiveById" parameterType="long" resultType="PlaylistEntity">
-        SELECT id, name, playlist_type, system_code, sort_no, is_deleted, track_count, rules, created_at, updated_at
-        FROM playlist WHERE id = #{id} AND is_deleted = 0
+    <select id="selectActiveById" resultType="PlaylistEntity">
+        SELECT id, user_id, name, playlist_type, system_code, sort_no, is_deleted, track_count, rules, created_at, updated_at
+        FROM playlist WHERE id = #{id} AND user_id = #{userId} AND is_deleted = 0
     </select>
 
-    <select id="selectBySystemCode" parameterType="string" resultType="PlaylistEntity">
-        SELECT id, name, playlist_type, system_code, sort_no, is_deleted, track_count, rules, created_at, updated_at
-        FROM playlist WHERE system_code = #{systemCode} AND is_deleted = 0 LIMIT 1
+    <select id="selectBySystemCode" resultType="PlaylistEntity">
+        SELECT id, user_id, name, playlist_type, system_code, sort_no, is_deleted, track_count, rules, created_at, updated_at
+        FROM playlist WHERE user_id = #{userId} AND system_code = #{systemCode} AND is_deleted = 0 LIMIT 1
     </select>
 
     <select id="selectAllActive" resultType="PlaylistEntity">
-        SELECT id, name, playlist_type, system_code, sort_no, is_deleted, track_count, rules, created_at, updated_at
-        FROM playlist WHERE is_deleted = 0
+        SELECT id, user_id, name, playlist_type, system_code, sort_no, is_deleted, track_count, rules, created_at, updated_at
+        FROM playlist WHERE user_id = #{userId} AND is_deleted = 0
         ORDER BY CASE WHEN playlist_type = 'SYSTEM' THEN 0 ELSE 1 END, sort_no ASC, updated_at DESC, id DESC
     </select>
 
     <select id="selectAllActiveIds" resultType="java.lang.Long">
-        SELECT id FROM playlist WHERE is_deleted = 0
+        SELECT id FROM playlist WHERE user_id = #{userId} AND is_deleted = 0
         ORDER BY CASE WHEN playlist_type = 'SYSTEM' THEN 0 ELSE 1 END, sort_no ASC, id ASC
     </select>
 
     <select id="selectMaxSortNoOfNormal" resultType="java.lang.Integer">
-        SELECT IFNULL(MAX(sort_no), 0) FROM playlist WHERE is_deleted = 0 AND playlist_type = 'NORMAL'
+        SELECT IFNULL(MAX(sort_no), 0) FROM playlist WHERE user_id = #{userId} AND is_deleted = 0 AND playlist_type = 'NORMAL'
     </select>
 
-    <select id="countByName" parameterType="string" resultType="int">
-        SELECT COUNT(1) FROM playlist WHERE name = #{name} AND is_deleted = 0
+    <select id="countByName" resultType="int">
+        SELECT COUNT(1) FROM playlist WHERE user_id = #{userId} AND name = #{name} AND is_deleted = 0
     </select>
 
     <update id="renameNormal">
         UPDATE playlist SET name = #{name}, updated_at = NOW()
-        WHERE id = #{id} AND is_deleted = 0 AND playlist_type = 'NORMAL'
+        WHERE id = #{id} AND user_id = #{userId} AND is_deleted = 0 AND playlist_type = 'NORMAL'
     </update>
 
     <update id="softDeleteNormal">
         UPDATE playlist SET is_deleted = 1, updated_at = NOW()
-        WHERE id = #{id} AND is_deleted = 0 AND playlist_type = 'NORMAL'
+        WHERE id = #{id} AND user_id = #{userId} AND is_deleted = 0 AND playlist_type = 'NORMAL'
     </update>
 
     <update id="updateSortNoNormal">
         UPDATE playlist SET sort_no = #{sortNo}, updated_at = NOW()
-        WHERE id = #{id} AND is_deleted = 0 AND playlist_type = 'NORMAL'
+        WHERE id = #{id} AND user_id = #{userId} AND is_deleted = 0 AND playlist_type = 'NORMAL'
     </update>
 
     <update id="touchUpdatedAt">

@@ -8,6 +8,7 @@ import com.example.musicwebdav.domain.ShelfType;
 import com.example.musicwebdav.infrastructure.persistence.entity.TrackEntity;
 import com.example.musicwebdav.infrastructure.persistence.mapper.PlayEventMapper;
 import com.example.musicwebdav.infrastructure.persistence.mapper.TrackMapper;
+import com.example.musicwebdav.common.security.SecurityUtil;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -50,16 +51,17 @@ public class RecommendationService {
      * if a shelf has no data it is omitted from the result.
      */
     public List<ShelfResponse> buildAllShelves() {
+        Long userId = SecurityUtil.getCurrentUserId();
         List<ShelfResponse> shelves = new ArrayList<>();
 
-        tryAdd(shelves, buildHotTracks());
+        tryAdd(shelves, buildHotTracks(userId));
         tryAdd(shelves, buildRecentAdded());
         tryAdd(shelves, buildRecentAlbums());
-        tryAdd(shelves, buildListenAgain());
-        tryAdd(shelves, buildDiscovery());
-        tryAdd(shelves, buildFavoriteArtists());
-        tryAdd(shelves, buildGenreMix());
-        tryAdd(shelves, buildRediscover());
+        tryAdd(shelves, buildListenAgain(userId));
+        tryAdd(shelves, buildDiscovery(userId));
+        tryAdd(shelves, buildFavoriteArtists(userId));
+        tryAdd(shelves, buildGenreMix(userId));
+        tryAdd(shelves, buildRediscover(userId));
 
         return shelves;
     }
@@ -68,9 +70,9 @@ public class RecommendationService {
     // Individual shelf builders
     // ------------------------------------------------------------------
 
-    private ShelfResponse buildListenAgain() {
+    private ShelfResponse buildListenAgain(Long userId) {
         try {
-            List<TrackEntity> tracks = playEventMapper.selectListenAgain(SHELF_LIMIT);
+            List<TrackEntity> tracks = playEventMapper.selectListenAgain(SHELF_LIMIT, userId);
             if (tracks.isEmpty()) return null;
             return ShelfResponse.ofTracks(
                     ShelfType.LISTEN_AGAIN.name(),
@@ -83,9 +85,9 @@ public class RecommendationService {
         }
     }
 
-    private ShelfResponse buildDiscovery() {
+    private ShelfResponse buildDiscovery(Long userId) {
         try {
-            List<TrackEntity> tracks = playEventMapper.selectDiscovery(SHELF_LIMIT);
+            List<TrackEntity> tracks = playEventMapper.selectDiscovery(SHELF_LIMIT, userId);
             if (tracks.isEmpty()) return null;
             return ShelfResponse.ofTracks(
                     ShelfType.DISCOVERY.name(),
@@ -98,9 +100,9 @@ public class RecommendationService {
         }
     }
 
-    private ShelfResponse buildHotTracks() {
+    private ShelfResponse buildHotTracks(Long userId) {
         try {
-            List<TrackEntity> tracks = playEventMapper.selectHotTracks(HOT_DAYS, SHELF_LIMIT);
+            List<TrackEntity> tracks = playEventMapper.selectHotTracks(HOT_DAYS, SHELF_LIMIT, userId);
             if (tracks.isEmpty()) return null;
             return ShelfResponse.ofTracks(
                     ShelfType.HOT_TRACKS.name(),
@@ -154,9 +156,9 @@ public class RecommendationService {
         }
     }
 
-    private ShelfResponse buildFavoriteArtists() {
+    private ShelfResponse buildFavoriteArtists(Long userId) {
         try {
-            List<String> artists = playEventMapper.selectTopArtists(HOT_DAYS, SHELF_LIMIT);
+            List<String> artists = playEventMapper.selectTopArtists(HOT_DAYS, SHELF_LIMIT, userId);
             if (artists.isEmpty()) return null;
 
             List<ShelfArtistResponse> result = new ArrayList<>();
@@ -182,9 +184,9 @@ public class RecommendationService {
         }
     }
 
-    private ShelfResponse buildGenreMix() {
+    private ShelfResponse buildGenreMix(Long userId) {
         try {
-            List<String> genres = playEventMapper.selectTopGenres(HOT_DAYS, GENRE_MIX_TOP_N);
+            List<String> genres = playEventMapper.selectTopGenres(HOT_DAYS, GENRE_MIX_TOP_N, userId);
             if (genres.isEmpty()) {
                 // Fallback: random tracks if no play history
                 return null;
@@ -211,9 +213,9 @@ public class RecommendationService {
         }
     }
 
-    private ShelfResponse buildRediscover() {
+    private ShelfResponse buildRediscover(Long userId) {
         try {
-            List<Long> recentIds = playEventMapper.selectRecentlyPlayedTrackIds(REDISCOVER_DAYS);
+            List<Long> recentIds = playEventMapper.selectRecentlyPlayedTrackIds(REDISCOVER_DAYS, userId);
             List<TrackEntity> tracks = trackMapper.selectRandomExcluding(
                     recentIds.isEmpty() ? Collections.emptyList() : recentIds,
                     SHELF_LIMIT

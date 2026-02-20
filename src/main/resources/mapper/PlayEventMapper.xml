@@ -20,7 +20,7 @@
               ELSE 0 END
             ) / LN(AVG(TIMESTAMPDIFF(HOUR, pe.created_at, NOW())) + 2) AS heat
           FROM play_event pe
-          WHERE pe.created_at >= DATE_SUB(NOW(), INTERVAL #{days} DAY)
+          WHERE pe.user_id = #{userId} AND pe.created_at >= DATE_SUB(NOW(), INTERVAL #{days} DAY)
           GROUP BY pe.track_id
           HAVING heat > 0
         ) scored
@@ -33,7 +33,7 @@
         SELECT t.artist
         FROM play_event pe
         INNER JOIN track t ON t.id = pe.track_id AND t.is_deleted = 0
-        WHERE pe.created_at >= DATE_SUB(NOW(), INTERVAL #{days} DAY)
+        WHERE pe.user_id = #{userId} AND pe.created_at >= DATE_SUB(NOW(), INTERVAL #{days} DAY)
           AND t.artist IS NOT NULL AND t.artist &lt;&gt; ''
         GROUP BY t.artist
         ORDER BY SUM(CASE pe.event_type
@@ -48,7 +48,7 @@
         SELECT t.genre
         FROM play_event pe
         INNER JOIN track t ON t.id = pe.track_id AND t.is_deleted = 0
-        WHERE pe.created_at >= DATE_SUB(NOW(), INTERVAL #{days} DAY)
+        WHERE pe.user_id = #{userId} AND pe.created_at >= DATE_SUB(NOW(), INTERVAL #{days} DAY)
           AND t.genre IS NOT NULL AND t.genre &lt;&gt; ''
         GROUP BY t.genre
         ORDER BY SUM(CASE pe.event_type
@@ -62,7 +62,7 @@
     <select id="selectRecentlyPlayedTrackIds" resultType="java.lang.Long">
         SELECT DISTINCT pe.track_id
         FROM play_event pe
-        WHERE pe.created_at >= DATE_SUB(NOW(), INTERVAL #{days} DAY)
+        WHERE pe.user_id = #{userId} AND pe.created_at >= DATE_SUB(NOW(), INTERVAL #{days} DAY)
     </select>
 
     <select id="selectRecentlyPlayedTracks" resultType="TrackEntity">
@@ -70,7 +70,7 @@
         FROM (
           SELECT pe.track_id, MAX(pe.created_at) AS last_played_at
           FROM play_event pe
-          WHERE pe.event_type IN ('PLAY_START', 'PLAY_COMPLETE')
+          WHERE pe.user_id = #{userId} AND pe.event_type IN ('PLAY_START', 'PLAY_COMPLETE')
           GROUP BY pe.track_id
         ) rp
         INNER JOIN track t ON t.id = rp.track_id AND t.is_deleted = 0
@@ -82,7 +82,7 @@
         SELECT COUNT(DISTINCT pe.track_id)
         FROM play_event pe
         INNER JOIN track t ON t.id = pe.track_id AND t.is_deleted = 0
-        WHERE pe.event_type IN ('PLAY_START', 'PLAY_COMPLETE')
+        WHERE pe.user_id = #{userId} AND pe.event_type IN ('PLAY_START', 'PLAY_COMPLETE')
     </select>
 
     <select id="selectListenAgain" resultType="TrackEntity">
@@ -90,7 +90,7 @@
         FROM (
           SELECT pe.track_id, COUNT(*) as play_count
           FROM play_event pe
-          WHERE pe.event_type = 'PLAY_COMPLETE'
+          WHERE pe.user_id = #{userId} AND pe.event_type = 'PLAY_COMPLETE'
           GROUP BY pe.track_id
           HAVING play_count >= 3
         ) scored
@@ -108,7 +108,7 @@
                   SELECT t2.genre
                   FROM play_event pe2
                   INNER JOIN track t2 ON t2.id = pe2.track_id
-                  WHERE pe2.created_at >= DATE_SUB(NOW(), INTERVAL 90 DAY)
+                  WHERE pe2.user_id = #{userId} AND pe2.created_at >= DATE_SUB(NOW(), INTERVAL 90 DAY)
                     AND t2.genre IS NOT NULL AND t2.genre &lt;&gt; ''
                   GROUP BY t2.genre
                   ORDER BY COUNT(*) DESC
@@ -120,7 +120,7 @@
                   SELECT t3.artist
                   FROM play_event pe3
                   INNER JOIN track t3 ON t3.id = pe3.track_id
-                  WHERE pe3.created_at >= DATE_SUB(NOW(), INTERVAL 90 DAY)
+                  WHERE pe3.user_id = #{userId} AND pe3.created_at >= DATE_SUB(NOW(), INTERVAL 90 DAY)
                     AND t3.artist IS NOT NULL AND t3.artist &lt;&gt; ''
                   GROUP BY t3.artist
                   ORDER BY COUNT(*) DESC
@@ -131,7 +131,7 @@
           AND t.id NOT IN (
             SELECT DISTINCT pe4.track_id
             FROM play_event pe4
-            WHERE pe4.created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+            WHERE pe4.user_id = #{userId} AND pe4.created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
           )
         ORDER BY RAND()
         LIMIT #{limit}

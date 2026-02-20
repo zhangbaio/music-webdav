@@ -4,17 +4,11 @@ import java.time.LocalDateTime;
 import lombok.Data;
 
 @Data
-public class PlayEventEntity {
-
+public class UserEntity {
     private Long id;
-
-    private Long userId;
-
-    private Long trackId;
-
-    private String eventType;
-
-    private Integer durationSec;
-
+    private String username;
+    private String passwordHash;
+    private String role;
     private LocalDateTime createdAt;
+    private LocalDateTime updatedAt;
 }
