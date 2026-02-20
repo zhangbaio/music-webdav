@@ -91,4 +91,28 @@ public interface PlayEventMapper {
             + "FROM play_event pe "
             + "WHERE pe.created_at >= DATE_SUB(NOW(), INTERVAL #{days} DAY)")
     List<Long> selectRecentlyPlayedTrackIds(@Param("days") int days);
+
+    /**
+     * Recently played tracks ordered by latest play timestamp (deduplicated by track).
+     */
+    @Select("SELECT t.id, t.title, t.artist, t.album, t.source_path, t.duration_sec, t.has_lyric "
+            + "FROM ("
+            + "  SELECT pe.track_id, MAX(pe.created_at) AS last_played_at "
+            + "  FROM play_event pe "
+            + "  WHERE pe.event_type IN ('PLAY_START', 'PLAY_COMPLETE') "
+            + "  GROUP BY pe.track_id "
+            + ") rp "
+            + "INNER JOIN track t ON t.id = rp.track_id AND t.is_deleted = 0 "
+            + "ORDER BY rp.last_played_at DESC "
+            + "LIMIT #{offset}, #{limit}")
+    List<TrackEntity> selectRecentlyPlayedTracks(@Param("offset") int offset, @Param("limit") int limit);
+
+    /**
+     * Count distinct tracks in recently-played stream.
+     */
+    @Select("SELECT COUNT(DISTINCT pe.track_id) "
+            + "FROM play_event pe "
+            + "INNER JOIN track t ON t.id = pe.track_id AND t.is_deleted = 0 "
+            + "WHERE pe.event_type IN ('PLAY_START', 'PLAY_COMPLETE')")
+    long countRecentlyPlayedTracks();
 }
