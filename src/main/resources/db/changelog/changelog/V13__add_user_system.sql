@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS users (
 
 -- Insert default admin user: admin / admin123 (BCrypt hash)
 INSERT INTO users (id, username, password_hash, role)
-VALUES (1, 'admin', '$2a$10$7/0.e.g.1.2.3.4.5.6.7.8.9.0.1.2.3.4.5.6.7.8.9.0', 'ADMIN');
+VALUES (1, 'admin', '$2a$10$8.UnVuG9HHgffUDAlk8qfOuVGkqRzgVymGe07xd00DMxs.TVuHOnu', 'ADMIN');
 
 -- Add user_id column to playlist
 ALTER TABLE playlist ADD COLUMN user_id BIGINT NOT NULL DEFAULT 1 COMMENT 'Owner User ID';
