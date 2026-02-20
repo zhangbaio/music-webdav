@@ -34,7 +34,7 @@
         FROM play_event pe
         INNER JOIN track t ON t.id = pe.track_id AND t.is_deleted = 0
         WHERE pe.created_at >= DATE_SUB(NOW(), INTERVAL #{days} DAY)
-          AND t.artist IS NOT NULL AND t.artist <> ''
+          AND t.artist IS NOT NULL AND t.artist &lt;&gt; ''
         GROUP BY t.artist
         ORDER BY SUM(CASE pe.event_type
           WHEN 'PLAY_COMPLETE' THEN 3
@@ -49,7 +49,7 @@
         FROM play_event pe
         INNER JOIN track t ON t.id = pe.track_id AND t.is_deleted = 0
         WHERE pe.created_at >= DATE_SUB(NOW(), INTERVAL #{days} DAY)
-          AND t.genre IS NOT NULL AND t.genre <> ''
+          AND t.genre IS NOT NULL AND t.genre &lt;&gt; ''
         GROUP BY t.genre
         ORDER BY SUM(CASE pe.event_type
           WHEN 'PLAY_COMPLETE' THEN 3

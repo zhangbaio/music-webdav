@@ -9,6 +9,7 @@ import static org.mockito.Mockito.when;
 import com.example.musicwebdav.api.response.PlaybackSessionResponse;
 import com.example.musicwebdav.common.config.AppPlaybackProperties;
 import com.example.musicwebdav.common.config.AppSecurityProperties;
+import com.example.musicwebdav.common.config.AppWebDavProperties;
 import com.example.musicwebdav.infrastructure.persistence.entity.TrackEntity;
 import com.example.musicwebdav.infrastructure.persistence.mapper.TrackMapper;
 import com.example.musicwebdav.infrastructure.persistence.mapper.WebDavConfigMapper;
@@ -49,6 +50,7 @@ class TrackPlaybackServiceTest {
                 playbackTokenService,
                 playbackControlService,
                 playbackProperties,
+                new AppWebDavProperties(),
                 beanProvider(meterRegistry)
         );
 
