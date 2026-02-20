@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.musicwebdav.infrastructure.persistence.mapper.ScanTaskItemMapper">
+    <insert id="insert">
+        INSERT INTO scan_task_item(task_id, source_path, source_path_md5, item_status, error_code, error_message)
+        VALUES(#{taskId}, #{sourcePath}, #{sourcePathMd5}, #{itemStatus}, #{errorCode}, #{errorMessage})
+    </insert>
+</mapper>

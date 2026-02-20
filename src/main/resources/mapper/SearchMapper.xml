@@ -1,0 +1,236 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.musicwebdav.infrastructure.persistence.mapper.SearchMapper">
+    <select id="selectSongPageAll" resultType="TrackEntity">
+        SELECT t.id, t.title, t.artist, t.album, t.source_path, t.duration_sec, t.has_lyric
+        FROM track t
+        WHERE t.is_deleted = 0
+        <if test="keyword != null and keyword != ''">
+            AND (t.title LIKE CONCAT('%', #{keyword}, '%')
+                OR t.artist LIKE CONCAT('%', #{keyword}, '%')
+                OR t.album LIKE CONCAT('%', #{keyword}, '%'))
+        </if>
+        ORDER BY
+        <if test="keyword != null and keyword != ''">
+            CASE
+                WHEN LOWER(t.title) = LOWER(#{keyword}) THEN 0
+                WHEN LOWER(t.title) LIKE CONCAT(LOWER(#{keyword}), '%') THEN 1
+                WHEN LOWER(t.artist) = LOWER(#{keyword}) THEN 2
+                WHEN LOWER(t.album) = LOWER(#{keyword}) THEN 3
+                ELSE 9
+            END,
+        </if>
+        t.updated_at DESC, t.id DESC
+        LIMIT #{offset}, #{pageSize}
+    </select>
+
+    <select id="countSongAll" resultType="long">
+        SELECT COUNT(1)
+        FROM track t
+        WHERE t.is_deleted = 0
+        <if test="keyword != null and keyword != ''">
+            AND (t.title LIKE CONCAT('%', #{keyword}, '%')
+                OR t.artist LIKE CONCAT('%', #{keyword}, '%')
+                OR t.album LIKE CONCAT('%', #{keyword}, '%'))
+        </if>
+    </select>
+
+    <select id="selectSongPageMine" resultType="TrackEntity">
+        SELECT t.id, t.title, t.artist, t.album, t.source_path, t.duration_sec, t.has_lyric
+        FROM (
+            SELECT DISTINCT pt.track_id
+            FROM playlist_track pt
+            INNER JOIN playlist p ON p.id = pt.playlist_id
+            WHERE p.is_deleted = 0
+        ) mine
+        INNER JOIN track t ON t.id = mine.track_id
+        WHERE t.is_deleted = 0
+        <if test="keyword != null and keyword != ''">
+            AND (t.title LIKE CONCAT('%', #{keyword}, '%')
+                OR t.artist LIKE CONCAT('%', #{keyword}, '%')
+                OR t.album LIKE CONCAT('%', #{keyword}, '%'))
+        </if>
+        ORDER BY
+        <if test="keyword != null and keyword != ''">
+            CASE
+                WHEN LOWER(t.title) = LOWER(#{keyword}) THEN 0
+                WHEN LOWER(t.title) LIKE CONCAT(LOWER(#{keyword}), '%') THEN 1
+                WHEN LOWER(t.artist) = LOWER(#{keyword}) THEN 2
+                WHEN LOWER(t.album) = LOWER(#{keyword}) THEN 3
+                ELSE 9
+            END,
+        </if>
+        t.updated_at DESC, t.id DESC
+        LIMIT #{offset}, #{pageSize}
+    </select>
+
+    <select id="countSongMine" resultType="long">
+        SELECT COUNT(1)
+        FROM (
+            SELECT DISTINCT pt.track_id
+            FROM playlist_track pt
+            INNER JOIN playlist p ON p.id = pt.playlist_id
+            WHERE p.is_deleted = 0
+        ) mine
+        INNER JOIN track t ON t.id = mine.track_id
+        WHERE t.is_deleted = 0
+        <if test="keyword != null and keyword != ''">
+            AND (t.title LIKE CONCAT('%', #{keyword}, '%')
+                OR t.artist LIKE CONCAT('%', #{keyword}, '%')
+                OR t.album LIKE CONCAT('%', #{keyword}, '%'))
+        </if>
+    </select>
+
+    <select id="selectArtistPage" resultType="com.example.musicwebdav.infrastructure.persistence.model.SearchArtistRow">
+        SELECT t.artist AS artist,
+               COUNT(1) AS trackCount,
+               COALESCE(MAX(CASE WHEN t.has_cover = 1 THEN t.id ELSE NULL END), MAX(t.id)) AS coverTrackId
+        FROM track t
+        WHERE t.is_deleted = 0
+          AND t.artist IS NOT NULL
+          AND t.artist != ''
+        <if test="keyword != null and keyword != ''">
+            AND t.artist LIKE CONCAT('%', #{keyword}, '%')
+        </if>
+        GROUP BY t.artist
+        ORDER BY
+        <if test="keyword != null and keyword != ''">
+            CASE
+                WHEN LOWER(t.artist) = LOWER(#{keyword}) THEN 0
+                WHEN LOWER(t.artist) LIKE CONCAT(LOWER(#{keyword}), '%') THEN 1
+                ELSE 9
+            END,
+        </if>
+        MAX(t.updated_at) DESC, COUNT(1) DESC, t.artist ASC
+        LIMIT #{offset}, #{pageSize}
+    </select>
+
+    <select id="countArtists" resultType="long">
+        SELECT COUNT(1) FROM (
+            SELECT t.artist
+            FROM track t
+            WHERE t.is_deleted = 0
+              AND t.artist IS NOT NULL
+              AND t.artist != ''
+            <if test="keyword != null and keyword != ''">
+                AND t.artist LIKE CONCAT('%', #{keyword}, '%')
+            </if>
+            GROUP BY t.artist
+        ) c
+    </select>
+
+    <select id="selectAlbumPage" resultType="com.example.musicwebdav.infrastructure.persistence.model.SearchAlbumRow">
+        SELECT t.album AS album,
+               t.artist AS artist,
+               COUNT(1) AS trackCount,
+               COALESCE(MAX(CASE WHEN t.has_cover = 1 THEN t.id ELSE NULL END), MAX(t.id)) AS coverTrackId
+        FROM track t
+        WHERE t.is_deleted = 0
+          AND t.album IS NOT NULL
+          AND t.album != ''
+        <if test="artist != null and artist != ''">
+            AND t.artist = #{artist}
+        </if>
+        <if test="keyword != null and keyword != ''">
+            AND (t.album LIKE CONCAT('%', #{keyword}, '%')
+                OR t.title LIKE CONCAT('%', #{keyword}, '%'))
+        </if>
+        GROUP BY t.album, t.artist
+        ORDER BY
+        <if test="keyword != null and keyword != ''">
+            CASE
+                WHEN LOWER(t.album) = LOWER(#{keyword}) THEN 0
+                WHEN LOWER(t.album) LIKE CONCAT(LOWER(#{keyword}), '%') THEN 1
+                ELSE 9
+            END,
+        </if>
+        MAX(t.updated_at) DESC, COUNT(1) DESC, t.album ASC
+        LIMIT #{offset}, #{pageSize}
+    </select>
+
+    <select id="countAlbums" resultType="long">
+        SELECT COUNT(1) FROM (
+            SELECT t.album, t.artist
+            FROM track t
+            WHERE t.is_deleted = 0
+              AND t.album IS NOT NULL
+              AND t.album != ''
+            <if test="artist != null and artist != ''">
+                AND t.artist = #{artist}
+            </if>
+            <if test="keyword != null and keyword != ''">
+                AND (t.album LIKE CONCAT('%', #{keyword}, '%')
+                    OR t.title LIKE CONCAT('%', #{keyword}, '%'))
+            </if>
+            GROUP BY t.album, t.artist
+        ) c
+    </select>
+
+    <select id="selectArtistTrackPage" resultType="TrackEntity">
+        SELECT t.id, t.title, t.artist, t.album, t.source_path, t.duration_sec, t.has_lyric
+        FROM track t
+        WHERE t.is_deleted = 0
+          AND t.artist = #{artist}
+        <if test="keyword != null and keyword != ''">
+            AND (t.title LIKE CONCAT('%', #{keyword}, '%')
+                OR t.album LIKE CONCAT('%', #{keyword}, '%')
+                OR t.artist LIKE CONCAT('%', #{keyword}, '%'))
+        </if>
+        ORDER BY
+        <if test="keyword != null and keyword != ''">
+            CASE
+                WHEN LOWER(t.title) = LOWER(#{keyword}) THEN 0
+                WHEN LOWER(t.title) LIKE CONCAT(LOWER(#{keyword}), '%') THEN 1
+                ELSE 9
+            END,
+        </if>
+        t.updated_at DESC, t.id DESC
+        LIMIT #{offset}, #{pageSize}
+    </select>
+
+    <select id="countArtistTracks" resultType="long">
+        SELECT COUNT(1)
+        FROM track t
+        WHERE t.is_deleted = 0
+          AND t.artist = #{artist}
+        <if test="keyword != null and keyword != ''">
+            AND (t.title LIKE CONCAT('%', #{keyword}, '%')
+                OR t.album LIKE CONCAT('%', #{keyword}, '%')
+                OR t.artist LIKE CONCAT('%', #{keyword}, '%'))
+        </if>
+    </select>
+
+    <select id="selectExactArtist" resultType="java.lang.String">
+        SELECT t.artist
+        FROM track t
+        WHERE t.is_deleted = 0
+          AND t.artist IS NOT NULL
+          AND t.artist != ''
+          AND LOWER(t.artist) = LOWER(#{keyword})
+        GROUP BY t.artist
+        ORDER BY COUNT(1) DESC
+        LIMIT 1
+    </select>
+
+    <select id="selectFuzzyArtist" resultType="java.lang.String">
+        SELECT t.artist
+        FROM track t
+        WHERE t.is_deleted = 0
+          AND t.artist IS NOT NULL
+          AND t.artist != ''
+          AND t.artist LIKE CONCAT('%', #{keyword}, '%')
+        GROUP BY t.artist
+        ORDER BY
+            CASE WHEN LOWER(t.artist) LIKE CONCAT(LOWER(#{keyword}), '%') THEN 0 ELSE 1 END,
+            COUNT(1) DESC, t.artist ASC
+        LIMIT 1
+    </select>
+
+    <select id="countArtistTracksByName" resultType="long">
+        SELECT COUNT(1)
+        FROM track t
+        WHERE t.is_deleted = 0
+          AND t.artist = #{artist}
+    </select>
+</mapper>

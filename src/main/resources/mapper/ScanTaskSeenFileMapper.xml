@@ -2,10 +2,19 @@
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
 <mapper namespace="com.example.musicwebdav.infrastructure.persistence.mapper.ScanTaskSeenFileMapper">
+    <insert id="insert">
+        INSERT IGNORE INTO scan_task_seen_file(task_id, source_path_md5)
+        VALUES(#{taskId}, #{sourcePathMd5})
+    </insert>
+
     <insert id="batchInsert">
         INSERT IGNORE INTO scan_task_seen_file(task_id, source_path_md5) VALUES
         <foreach collection="md5List" item="md5" separator=",">
             (#{taskId}, #{md5})
         </foreach>
     </insert>
+
+    <delete id="deleteByTaskId">
+        DELETE FROM scan_task_seen_file WHERE task_id = #{taskId}
+    </delete>
 </mapper>

@@ -43,4 +43,283 @@
             last_scan_task_id = VALUES(last_scan_task_id),
             updated_at = NOW()
     </insert>
+
+    <insert id="upsert" parameterType="com.example.musicwebdav.infrastructure.persistence.entity.TrackEntity">
+        INSERT INTO track(
+            source_config_id, source_path, source_path_md5, source_etag, source_last_modified,
+            source_size, mime_type, content_hash,
+            title, artist, album, album_artist, track_no, disc_no, `year`, genre,
+            duration_sec, bitrate, sample_rate, channels,
+            has_cover, cover_art_url, has_lyric, lyric_path, is_deleted, last_scan_task_id)
+        VALUES (
+            #{sourceConfigId}, #{sourcePath}, #{sourcePathMd5}, #{sourceEtag}, #{sourceLastModified},
+            #{sourceSize}, #{mimeType}, #{contentHash},
+            #{title}, #{artist}, #{album}, #{albumArtist}, #{trackNo}, #{discNo}, #{year}, #{genre},
+            #{durationSec}, #{bitrate}, #{sampleRate}, #{channels},
+            #{hasCover}, #{coverArtUrl}, #{hasLyric}, #{lyricPath}, 0, #{lastScanTaskId})
+        ON DUPLICATE KEY UPDATE
+            source_config_id = VALUES(source_config_id),
+            source_path = VALUES(source_path),
+            source_etag = VALUES(source_etag),
+            source_last_modified = VALUES(source_last_modified),
+            source_size = VALUES(source_size),
+            mime_type = VALUES(mime_type),
+            content_hash = VALUES(content_hash),
+            title = VALUES(title),
+            artist = VALUES(artist),
+            album = VALUES(album),
+            album_artist = VALUES(album_artist),
+            track_no = VALUES(track_no),
+            disc_no = VALUES(disc_no),
+            `year` = VALUES(`year`),
+            genre = VALUES(genre),
+            duration_sec = VALUES(duration_sec),
+            bitrate = VALUES(bitrate),
+            sample_rate = VALUES(sample_rate),
+            channels = VALUES(channels),
+            has_cover = VALUES(has_cover),
+            cover_art_url = VALUES(cover_art_url),
+            has_lyric = VALUES(has_lyric),
+            lyric_path = VALUES(lyric_path),
+            is_deleted = 0,
+            last_scan_task_id = VALUES(last_scan_task_id),
+            updated_at = NOW()
+    </insert>
+
+    <select id="selectByConfigAndPathMd5" resultType="TrackEntity">
+        SELECT id, source_config_id, source_path, source_path_md5, source_etag, source_last_modified,
+               source_size, mime_type, content_hash,
+               title, artist, album, album_artist, track_no, disc_no, `year`, genre,
+               duration_sec, bitrate, sample_rate, channels,
+               has_cover, cover_art_url, has_lyric, lyric_path, is_deleted, last_scan_task_id, created_at, updated_at
+        FROM track
+        WHERE source_config_id = #{sourceConfigId}
+          AND source_path_md5 = #{sourcePathMd5}
+    </select>
+
+    <select id="selectByConfigAndPathMd5In" resultType="TrackEntity">
+        SELECT id, source_config_id, source_path, source_path_md5, source_etag, source_last_modified,
+               source_size, mime_type, content_hash,
+               title, artist, album, album_artist, track_no, disc_no, `year`, genre,
+               duration_sec, bitrate, sample_rate, channels,
+               has_cover, cover_art_url, has_lyric, lyric_path, is_deleted, last_scan_task_id, created_at, updated_at
+        FROM track
+        WHERE source_config_id = #{sourceConfigId}
+          AND source_path_md5 IN
+            <foreach collection="sourcePathMd5List" item="md5" open="(" separator="," close=")">
+                #{md5}
+            </foreach>
+    </select>
+
+    <update id="softDeleteByTaskId">
+        UPDATE track t
+        LEFT JOIN scan_task_seen_file s
+            ON s.task_id = #{taskId} AND s.source_path_md5 = t.source_path_md5
+        SET t.is_deleted = 1,
+            t.updated_at = NOW()
+        WHERE s.id IS NULL
+          AND t.is_deleted = 0
+          AND t.source_config_id = #{configId}
+    </update>
+
+    <update id="softDeleteByLastScanTaskId">
+        UPDATE track
+        SET is_deleted = 1,
+            updated_at = NOW()
+        WHERE is_deleted = 0
+          AND source_config_id = #{configId}
+          AND (last_scan_task_id IS NULL OR last_scan_task_id &lt;&gt; #{taskId})
+    </update>
+
+    <update id="touchLastScanTaskByPathMd5In">
+        UPDATE track
+        SET last_scan_task_id = #{taskId}
+        WHERE is_deleted = 0
+          AND source_config_id = #{configId}
+          AND source_path_md5 IN
+            <foreach collection="sourcePathMd5List" item="md5" open="(" separator="," close=")">
+                #{md5}
+            </foreach>
+    </update>
+
+    <update id="touchLastScanTaskByConfig">
+        UPDATE track
+        SET last_scan_task_id = #{taskId}
+        WHERE is_deleted = 0
+          AND source_config_id = #{configId}
+    </update>
+
+    <update id="touchLastScanTaskByDirectoryPrefix">
+        UPDATE track
+        SET last_scan_task_id = #{taskId}
+        WHERE is_deleted = 0
+          AND source_config_id = #{configId}
+          AND source_path LIKE #{likePattern} ESCAPE '\\'
+    </update>
+
+    <select id="selectPage" resultType="TrackEntity">
+        SELECT id, title, artist, album, source_path, duration_sec, has_lyric
+        FROM track
+        WHERE is_deleted = 0
+        <if test="keyword != null and keyword != ''">
+            AND (title LIKE CONCAT('%', #{keyword}, '%')
+                OR artist LIKE CONCAT('%', #{keyword}, '%')
+                OR album LIKE CONCAT('%', #{keyword}, '%'))
+        </if>
+        <if test="artist != null and artist != ''">
+            AND artist = #{artist}
+        </if>
+        <if test="album != null and album != ''">
+            AND album = #{album}
+        </if>
+        <if test="genre != null and genre != ''">
+            AND genre = #{genre}
+        </if>
+        <if test="year != null">
+            AND `year` = #{year}
+        </if>
+        ORDER BY
+        <choose>
+            <when test="sortBy == 'title'">title</when>
+            <when test="sortBy == 'artist'">artist</when>
+            <when test="sortBy == 'album'">album</when>
+            <when test="sortBy == 'year'">`year`</when>
+            <when test="sortBy == 'created_at'">created_at</when>
+            <otherwise>updated_at</otherwise>
+        </choose>
+        <choose>
+            <when test="sortOrder == 'ASC'"> ASC</when>
+            <otherwise> DESC</otherwise>
+        </choose>
+        LIMIT #{offset}, #{pageSize}
+    </select>
+
+    <select id="count" resultType="long">
+        SELECT COUNT(1)
+        FROM track
+        WHERE is_deleted = 0
+        <if test="keyword != null and keyword != ''">
+            AND (title LIKE CONCAT('%', #{keyword}, '%')
+                OR artist LIKE CONCAT('%', #{keyword}, '%')
+                OR album LIKE CONCAT('%', #{keyword}, '%'))
+        </if>
+        <if test="artist != null and artist != ''">
+            AND artist = #{artist}
+        </if>
+        <if test="album != null and album != ''">
+            AND album = #{album}
+        </if>
+        <if test="genre != null and genre != ''">
+            AND genre = #{genre}
+        </if>
+        <if test="year != null">
+            AND `year` = #{year}
+        </if>
+    </select>
+
+    <select id="selectById" resultType="TrackEntity">
+        SELECT id, source_config_id, source_path, source_path_md5, source_etag, source_last_modified,
+               source_size, mime_type, content_hash,
+               title, artist, album, album_artist, track_no, disc_no, `year`, genre,
+               duration_sec, bitrate, sample_rate, channels,
+               has_cover, cover_art_url, has_lyric, lyric_path, is_deleted, last_scan_task_id, created_at, updated_at
+        FROM track
+        WHERE id = #{id}
+          AND is_deleted = 0
+    </select>
+
+    <select id="search" resultType="TrackEntity">
+        SELECT id, title, artist, album, source_path, duration_sec, has_lyric
+        FROM track
+        WHERE is_deleted = 0
+          AND (title LIKE CONCAT('%', #{keyword}, '%')
+            OR artist LIKE CONCAT('%', #{keyword}, '%')
+            OR album LIKE CONCAT('%', #{keyword}, '%'))
+        ORDER BY updated_at DESC
+        LIMIT #{limit}
+    </select>
+
+    <select id="selectDuplicateGroups" resultType="com.example.musicwebdav.domain.model.DuplicateGroup">
+        SELECT LOWER(TRIM(title)) AS normalizedTitle,
+               LOWER(TRIM(artist)) AS normalizedArtist,
+               COUNT(*) AS count
+        FROM track
+        WHERE is_deleted = 0
+          AND source_config_id = #{configId}
+        GROUP BY LOWER(TRIM(title)), LOWER(TRIM(artist))
+        HAVING COUNT(*) &gt; 1
+    </select>
+
+    <select id="selectByNormalizedTitleAndArtist" resultType="TrackEntity">
+        SELECT id, source_config_id, source_path, source_size, title, artist
+        FROM track
+        WHERE is_deleted = 0
+          AND source_config_id = #{configId}
+          AND LOWER(TRIM(title)) = #{normalizedTitle}
+          AND LOWER(TRIM(artist)) = #{normalizedArtist}
+    </select>
+
+    <update id="softDeleteByIds">
+        UPDATE track
+        SET is_deleted = 1,
+            updated_at = NOW()
+        WHERE id IN
+            <foreach collection="ids" item="id" open="(" separator="," close=")">
+                #{id}
+            </foreach>
+    </update>
+
+    <select id="selectRecentlyAdded" resultType="TrackEntity">
+        SELECT id, title, artist, album, source_path, duration_sec, has_lyric
+        FROM track
+        WHERE is_deleted = 0
+        ORDER BY created_at DESC
+        LIMIT #{limit}
+    </select>
+
+    <select id="selectRecentAlbums" resultType="java.util.HashMap">
+        SELECT t.album,
+               t.artist,
+               COUNT(*) AS trackCount,
+               MIN(t.id) AS coverTrackId,
+               MAX(t.`year`) AS `year`
+        FROM track t
+        WHERE t.is_deleted = 0
+          AND t.album IS NOT NULL
+          AND t.album &lt;&gt; ''
+        GROUP BY t.album, t.artist
+        ORDER BY MAX(t.created_at) DESC
+        LIMIT #{limit}
+    </select>
+
+    <select id="selectArtistInfo" resultType="java.util.HashMap">
+        SELECT COUNT(*) AS trackCount,
+               MIN(id) AS coverTrackId
+        FROM track
+        WHERE is_deleted = 0
+          AND artist = #{artist}
+    </select>
+
+    <select id="selectByGenreRandom" resultType="TrackEntity">
+        SELECT id, title, artist, album, source_path, duration_sec, has_lyric
+        FROM track
+        WHERE is_deleted = 0
+          AND genre = #{genre}
+        ORDER BY RAND()
+        LIMIT #{limit}
+    </select>
+
+    <select id="selectRandomExcluding" resultType="TrackEntity">
+        SELECT id, title, artist, album, source_path, duration_sec, has_lyric
+        FROM track
+        WHERE is_deleted = 0
+        <if test="excludeIds != null and excludeIds.size() &gt; 0">
+            AND id NOT IN
+                <foreach collection="excludeIds" item="eid" open="(" separator="," close=")">
+                    #{eid}
+                </foreach>
+        </if>
+        ORDER BY RAND()
+        LIMIT #{limit}
+    </select>
 </mapper>
