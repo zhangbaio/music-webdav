@@ -207,13 +207,25 @@ public interface TrackMapper {
                                                        @Param("normalizedTitle") String normalizedTitle,
                                                        @Param("normalizedArtist") String normalizedArtist);
 
-    @Update("<script>"
-            + "UPDATE track SET is_deleted = 1, updated_at = NOW() WHERE id IN "
+    @Update("UPDATE track SET is_deleted = 1, updated_at = NOW() WHERE id IN "
             + "<foreach item='id' collection='ids' open='(' separator=',' close=')'>"
             + "#{id}"
             + "</foreach>"
             + "</script>")
     int softDeleteByIds(@Param("ids") List<Long> ids);
+
+    @Update("UPDATE track SET "
+            + "title = #{title}, "
+            + "artist = #{artist}, "
+            + "album = #{album}, "
+            + "album_artist = #{albumArtist}, "
+            + "track_no = #{trackNo}, "
+            + "disc_no = #{discNo}, "
+            + "`year` = #{year}, "
+            + "genre = #{genre}, "
+            + "updated_at = NOW() "
+            + "WHERE id = #{id}")
+    int updateMetadata(TrackEntity entity);
 
     // --- Feature 8: Batch operations (defined in TrackMapper.xml) ---
 

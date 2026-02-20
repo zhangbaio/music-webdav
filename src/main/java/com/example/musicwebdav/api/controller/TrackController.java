@@ -1,5 +1,6 @@
 package com.example.musicwebdav.api.controller;
 
+import com.example.musicwebdav.api.request.TrackUpdateRequest;
 import com.example.musicwebdav.api.response.ApiResponse;
 import com.example.musicwebdav.api.response.CoverSessionResponse;
 import com.example.musicwebdav.api.response.PlaybackSessionResponse;
@@ -9,13 +10,16 @@ import com.example.musicwebdav.api.response.TrackResponse;
 import com.example.musicwebdav.common.exception.BusinessException;
 import com.example.musicwebdav.application.service.TrackPlaybackService;
 import com.example.musicwebdav.application.service.TrackQueryService;
+import com.example.musicwebdav.application.service.TrackUpdateService;
 import java.util.List;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -26,11 +30,14 @@ public class TrackController {
 
     private final TrackQueryService trackQueryService;
     private final TrackPlaybackService trackPlaybackService;
+    private final TrackUpdateService trackUpdateService;
 
     public TrackController(TrackQueryService trackQueryService,
-                           TrackPlaybackService trackPlaybackService) {
+                           TrackPlaybackService trackPlaybackService,
+                           TrackUpdateService trackUpdateService) {
         this.trackQueryService = trackQueryService;
         this.trackPlaybackService = trackPlaybackService;
+        this.trackUpdateService = trackUpdateService;
     }
 
     @GetMapping
@@ -74,6 +81,12 @@ public class TrackController {
             return ApiResponse.fail("404", "歌曲不存在");
         }
         return ApiResponse.success(response);
+    }
+
+    @PatchMapping("/{id}")
+    public ApiResponse<TrackResponse> patchTrack(@PathVariable("id") Long id,
+                                                 @RequestBody TrackUpdateRequest request) {
+        return ApiResponse.success(trackUpdateService.updateTrack(id, request));
     }
 
     @GetMapping("/{id}/playback-session")
