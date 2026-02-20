@@ -11,6 +11,14 @@
                 #{updatedCount}, #{deletedCount}, #{failedCount}, #{processedDirectories}, #{totalDirectories}, #{progressPct})
     </insert>
 
+    <select id="selectInterruptedTasks" resultType="ScanTaskEntity">
+        SELECT id, task_type, status, config_id, start_time, end_time, total_files, audio_files,
+            added_count, updated_count, deleted_count, failed_count,
+            processed_directories, total_directories, last_synced_dir, progress_pct,
+            error_summary, created_at, updated_at
+        FROM scan_task WHERE status IN ('PENDING', 'RUNNING')
+    </select>
+
     <select id="selectById" resultType="ScanTaskEntity">
         SELECT id, task_type, status, config_id, start_time, end_time, total_files, audio_files,
             added_count, updated_count, deleted_count, failed_count,

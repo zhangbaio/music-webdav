@@ -9,6 +9,8 @@ public interface ScanTaskMapper {
 
     int insert(ScanTaskEntity entity);
 
+    java.util.List<ScanTaskEntity> selectInterruptedTasks();
+
     ScanTaskEntity selectById(@Param("id") Long id);
 
     String selectStatusById(@Param("id") Long id);

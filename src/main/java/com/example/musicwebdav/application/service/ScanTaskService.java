@@ -12,12 +12,16 @@ import com.example.musicwebdav.infrastructure.persistence.mapper.ScanCheckpointM
 import com.example.musicwebdav.infrastructure.persistence.mapper.ScanTaskMapper;
 import com.example.musicwebdav.infrastructure.persistence.mapper.WebDavConfigMapper;
 import java.util.Collections;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class ScanTaskService {
@@ -40,6 +44,40 @@ public class ScanTaskService {
         this.scanCheckpointMapper = scanCheckpointMapper;
         this.fullScanService = fullScanService;
         this.scanTaskExecutor = scanTaskExecutor;
+    }
+
+    @EventListener(ApplicationReadyEvent.class)
+    public void onApplicationReady() {
+        resumeInterruptedTasks();
+    }
+
+    public void resumeInterruptedTasks() {
+        List<ScanTaskEntity> interrupted = scanTaskMapper.selectInterruptedTasks();
+        if (interrupted.isEmpty()) {
+            return;
+        }
+
+        log.info("STARTUP_RESUME_CHECK: found {} interrupted tasks", interrupted.size());
+        for (ScanTaskEntity task : interrupted) {
+            WebDavConfigEntity config = webDavConfigMapper.selectById(task.getConfigId());
+            if (config == null) {
+                log.warn("CANNOT_RESUME_TASK taskId={} configId={} reason=CONFIG_NOT_FOUND",
+                        task.getId(), task.getConfigId());
+                continue;
+            }
+
+            Set<String> checkpoints = scanCheckpointMapper.selectCompletedDirMd5s(task.getId());
+            TaskType type = TaskType.valueOf(task.getTaskType());
+
+            log.info("RESUMING_INTERRUPTED_TASK taskId={} type={} checkpoints={}",
+                    task.getId(), task.getTaskType(), checkpoints.size());
+
+            try {
+                scanTaskExecutor.submit(() -> executeScanTask(task.getId(), type, config, checkpoints));
+            } catch (RejectedExecutionException e) {
+                log.error("RESUME_SUBMIT_FAILED taskId={}", task.getId(), e);
+            }
+        }
     }
 
     public CreateScanTaskResponse createTask(CreateScanTaskRequest request) {
@@ -121,10 +159,14 @@ public class ScanTaskService {
         int runningUpdated = scanTaskMapper.markRunning(taskId, TaskStatus.RUNNING.name());
         if (runningUpdated == 0) {
             String currentStatus = scanTaskMapper.selectStatusById(taskId);
-            log.info("SCAN_TASK_START_SKIPPED taskId={} currentStatus={}", taskId, currentStatus);
-            return;
+            if (!TaskStatus.RUNNING.name().equals(currentStatus)) {
+                log.info("SCAN_TASK_START_SKIPPED taskId={} currentStatus={}", taskId, currentStatus);
+                return;
+            }
+            log.info("SCAN_TASK_CONTINUE_RUNNING taskId={} type={} configId={}", taskId, taskType.name(), config.getId());
+        } else {
+            log.info("SCAN_TASK_RUNNING taskId={} type={} configId={}", taskId, taskType.name(), config.getId());
         }
-        log.info("SCAN_TASK_RUNNING taskId={} type={} configId={}", taskId, taskType.name(), config.getId());
         try {
             FullScanService.ScanStats stats = fullScanService.scan(
                     taskId, taskType, config, () -> isCanceled(taskId), resumedCheckpoints);

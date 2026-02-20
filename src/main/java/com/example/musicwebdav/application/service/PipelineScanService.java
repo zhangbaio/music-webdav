@@ -1130,11 +1130,16 @@ public class PipelineScanService {
             if (!StringUtils.hasText(extension) || !lyricExtensions.contains(extension)) {
                 continue;
             }
-            String lyricKey = buildPathWithoutExtensionKey(relativePath);
-            if (!StringUtils.hasText(lyricKey)) {
-                continue;
+            // Exact match key (strip extension only)
+            String exactKey = buildPathWithoutExtensionKey(relativePath);
+            if (StringUtils.hasText(exactKey)) {
+                lyricPathIndex.putIfAbsent(exactKey, relativePath);
             }
-            lyricPathIndex.putIfAbsent(lyricKey, relativePath);
+            // Fuzzy match key (strip extension + leading numbers/symbols)
+            String fuzzyKey = buildFuzzyLyricKey(relativePath);
+            if (StringUtils.hasText(fuzzyKey)) {
+                lyricPathIndex.putIfAbsent(fuzzyKey, relativePath);
+            }
         }
         return lyricPathIndex;
     }
@@ -1143,11 +1148,36 @@ public class PipelineScanService {
         if (!StringUtils.hasText(audioRelativePath) || lyricPathIndex == null || lyricPathIndex.isEmpty()) {
             return null;
         }
-        String lyricKey = buildPathWithoutExtensionKey(audioRelativePath);
-        if (!StringUtils.hasText(lyricKey)) {
-            return null;
+        // 1. Try exact match
+        String exactKey = buildPathWithoutExtensionKey(audioRelativePath);
+        if (StringUtils.hasText(exactKey)) {
+            String path = lyricPathIndex.get(exactKey);
+            if (path != null) return path;
         }
-        return lyricPathIndex.get(lyricKey);
+        // 2. Try fuzzy match
+        String fuzzyKey = buildFuzzyLyricKey(audioRelativePath);
+        if (StringUtils.hasText(fuzzyKey)) {
+            return lyricPathIndex.get(fuzzyKey);
+        }
+        return null;
+    }
+
+    private String buildFuzzyLyricKey(String relativePath) {
+        String name = stripFileExtension(relativePath);
+        if (name == null) {
+            name = relativePath;
+        }
+        // Remove path segments (get only filename)
+        int lastSlash = name.lastIndexOf('/');
+        if (lastSlash >= 0) {
+            name = name.substring(lastSlash + 1);
+        }
+        // Remove leading numbers, dots, spaces, dashes (e.g. "01. ", "02-")
+        String fuzzy = name.replaceAll("^[0-9\\s\\.\\-_]+", "");
+        if (fuzzy.isEmpty()) {
+            return name.toLowerCase(Locale.ROOT);
+        }
+        return fuzzy.toLowerCase(Locale.ROOT);
     }
 
     private String buildPathWithoutExtensionKey(String relativePath) {

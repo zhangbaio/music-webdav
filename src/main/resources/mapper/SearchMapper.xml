@@ -7,9 +7,22 @@
         FROM track t
         WHERE t.is_deleted = 0
         <if test="keyword != null and keyword != ''">
-            AND (t.title LIKE CONCAT('%', #{keyword}, '%')
-                OR t.artist LIKE CONCAT('%', #{keyword}, '%')
-                OR t.album LIKE CONCAT('%', #{keyword}, '%'))
+            AND (
+                <bind name="pattern" value="'%' + keyword + '%'" />
+                t.title LIKE #{pattern}
+                OR t.artist LIKE #{pattern}
+                OR t.album LIKE #{pattern}
+                <bind name="words" value="keyword.split('\\s+')" />
+                <if test="words.length > 1">
+                    OR (
+                    <foreach item="word" collection="words" separator="AND">
+                        (t.title LIKE CONCAT('%', #{word}, '%')
+                        OR t.artist LIKE CONCAT('%', #{word}, '%')
+                        OR t.album LIKE CONCAT('%', #{word}, '%'))
+                    </foreach>
+                    )
+                </if>
+            )
         </if>
         ORDER BY
         <if test="keyword != null and keyword != ''">
@@ -30,9 +43,22 @@
         FROM track t
         WHERE t.is_deleted = 0
         <if test="keyword != null and keyword != ''">
-            AND (t.title LIKE CONCAT('%', #{keyword}, '%')
-                OR t.artist LIKE CONCAT('%', #{keyword}, '%')
-                OR t.album LIKE CONCAT('%', #{keyword}, '%'))
+            AND (
+                <bind name="pattern" value="'%' + keyword + '%'" />
+                t.title LIKE #{pattern}
+                OR t.artist LIKE #{pattern}
+                OR t.album LIKE #{pattern}
+                <bind name="words" value="keyword.split('\\s+')" />
+                <if test="words.length > 1">
+                    OR (
+                    <foreach item="word" collection="words" separator="AND">
+                        (t.title LIKE CONCAT('%', #{word}, '%')
+                        OR t.artist LIKE CONCAT('%', #{word}, '%')
+                        OR t.album LIKE CONCAT('%', #{word}, '%'))
+                    </foreach>
+                    )
+                </if>
+            )
         </if>
     </select>
 
@@ -47,9 +73,22 @@
         INNER JOIN track t ON t.id = mine.track_id
         WHERE t.is_deleted = 0
         <if test="keyword != null and keyword != ''">
-            AND (t.title LIKE CONCAT('%', #{keyword}, '%')
-                OR t.artist LIKE CONCAT('%', #{keyword}, '%')
-                OR t.album LIKE CONCAT('%', #{keyword}, '%'))
+            AND (
+                <bind name="pattern" value="'%' + keyword + '%'" />
+                t.title LIKE #{pattern}
+                OR t.artist LIKE #{pattern}
+                OR t.album LIKE #{pattern}
+                <bind name="words" value="keyword.split('\\s+')" />
+                <if test="words.length > 1">
+                    OR (
+                    <foreach item="word" collection="words" separator="AND">
+                        (t.title LIKE CONCAT('%', #{word}, '%')
+                        OR t.artist LIKE CONCAT('%', #{word}, '%')
+                        OR t.album LIKE CONCAT('%', #{word}, '%'))
+                    </foreach>
+                    )
+                </if>
+            )
         </if>
         ORDER BY
         <if test="keyword != null and keyword != ''">
@@ -76,9 +115,22 @@
         INNER JOIN track t ON t.id = mine.track_id
         WHERE t.is_deleted = 0
         <if test="keyword != null and keyword != ''">
-            AND (t.title LIKE CONCAT('%', #{keyword}, '%')
-                OR t.artist LIKE CONCAT('%', #{keyword}, '%')
-                OR t.album LIKE CONCAT('%', #{keyword}, '%'))
+            AND (
+                <bind name="pattern" value="'%' + keyword + '%'" />
+                t.title LIKE #{pattern}
+                OR t.artist LIKE #{pattern}
+                OR t.album LIKE #{pattern}
+                <bind name="words" value="keyword.split('\\s+')" />
+                <if test="words.length > 1">
+                    OR (
+                    <foreach item="word" collection="words" separator="AND">
+                        (t.title LIKE CONCAT('%', #{word}, '%')
+                        OR t.artist LIKE CONCAT('%', #{word}, '%')
+                        OR t.album LIKE CONCAT('%', #{word}, '%'))
+                    </foreach>
+                    )
+                </if>
+            )
         </if>
     </select>
 
@@ -91,7 +143,18 @@
           AND t.artist IS NOT NULL
           AND t.artist != ''
         <if test="keyword != null and keyword != ''">
-            AND t.artist LIKE CONCAT('%', #{keyword}, '%')
+            AND (
+                <bind name="pattern" value="'%' + keyword + '%'" />
+                t.artist LIKE #{pattern}
+                <bind name="words" value="keyword.split('\\s+')" />
+                <if test="words.length > 1">
+                    OR (
+                    <foreach item="word" collection="words" separator="AND">
+                        t.artist LIKE CONCAT('%', #{word}, '%')
+                    </foreach>
+                    )
+                </if>
+            )
         </if>
         GROUP BY t.artist
         ORDER BY
@@ -114,7 +177,18 @@
               AND t.artist IS NOT NULL
               AND t.artist != ''
             <if test="keyword != null and keyword != ''">
-                AND t.artist LIKE CONCAT('%', #{keyword}, '%')
+                AND (
+                    <bind name="pattern" value="'%' + keyword + '%'" />
+                    t.artist LIKE #{pattern}
+                    <bind name="words" value="keyword.split('\\s+')" />
+                    <if test="words.length > 1">
+                        OR (
+                        <foreach item="word" collection="words" separator="AND">
+                            t.artist LIKE CONCAT('%', #{word}, '%')
+                        </foreach>
+                        )
+                    </if>
+                )
             </if>
             GROUP BY t.artist
         ) c
@@ -133,8 +207,20 @@
             AND t.artist = #{artist}
         </if>
         <if test="keyword != null and keyword != ''">
-            AND (t.album LIKE CONCAT('%', #{keyword}, '%')
-                OR t.title LIKE CONCAT('%', #{keyword}, '%'))
+            AND (
+                <bind name="pattern" value="'%' + keyword + '%'" />
+                t.album LIKE #{pattern}
+                OR t.title LIKE #{pattern}
+                <bind name="words" value="keyword.split('\\s+')" />
+                <if test="words.length > 1">
+                    OR (
+                    <foreach item="word" collection="words" separator="AND">
+                        (t.album LIKE CONCAT('%', #{word}, '%')
+                        OR t.title LIKE CONCAT('%', #{word}, '%'))
+                    </foreach>
+                    )
+                </if>
+            )
         </if>
         GROUP BY t.album, t.artist
         ORDER BY
@@ -160,8 +246,20 @@
                 AND t.artist = #{artist}
             </if>
             <if test="keyword != null and keyword != ''">
-                AND (t.album LIKE CONCAT('%', #{keyword}, '%')
-                    OR t.title LIKE CONCAT('%', #{keyword}, '%'))
+                AND (
+                    <bind name="pattern" value="'%' + keyword + '%'" />
+                    t.album LIKE #{pattern}
+                    OR t.title LIKE #{pattern}
+                    <bind name="words" value="keyword.split('\\s+')" />
+                    <if test="words.length > 1">
+                        OR (
+                        <foreach item="word" collection="words" separator="AND">
+                            (t.album LIKE CONCAT('%', #{word}, '%')
+                            OR t.title LIKE CONCAT('%', #{word}, '%'))
+                        </foreach>
+                        )
+                    </if>
+                )
             </if>
             GROUP BY t.album, t.artist
         ) c
@@ -173,9 +271,22 @@
         WHERE t.is_deleted = 0
           AND t.artist = #{artist}
         <if test="keyword != null and keyword != ''">
-            AND (t.title LIKE CONCAT('%', #{keyword}, '%')
-                OR t.album LIKE CONCAT('%', #{keyword}, '%')
-                OR t.artist LIKE CONCAT('%', #{keyword}, '%'))
+            AND (
+                <bind name="pattern" value="'%' + keyword + '%'" />
+                t.title LIKE #{pattern}
+                OR t.album LIKE #{pattern}
+                OR t.artist LIKE #{pattern}
+                <bind name="words" value="keyword.split('\\s+')" />
+                <if test="words.length > 1">
+                    OR (
+                    <foreach item="word" collection="words" separator="AND">
+                        (t.title LIKE CONCAT('%', #{word}, '%')
+                        OR t.album LIKE CONCAT('%', #{word}, '%')
+                        OR t.artist LIKE CONCAT('%', #{word}, '%'))
+                    </foreach>
+                    )
+                </if>
+            )
         </if>
         ORDER BY
         <if test="keyword != null and keyword != ''">
@@ -195,9 +306,22 @@
         WHERE t.is_deleted = 0
           AND t.artist = #{artist}
         <if test="keyword != null and keyword != ''">
-            AND (t.title LIKE CONCAT('%', #{keyword}, '%')
-                OR t.album LIKE CONCAT('%', #{keyword}, '%')
-                OR t.artist LIKE CONCAT('%', #{keyword}, '%'))
+            AND (
+                <bind name="pattern" value="'%' + keyword + '%'" />
+                t.title LIKE #{pattern}
+                OR t.album LIKE #{pattern}
+                OR t.artist LIKE #{pattern}
+                <bind name="words" value="keyword.split('\\s+')" />
+                <if test="words.length > 1">
+                    OR (
+                    <foreach item="word" collection="words" separator="AND">
+                        (t.title LIKE CONCAT('%', #{word}, '%')
+                        OR t.album LIKE CONCAT('%', #{word}, '%')
+                        OR t.artist LIKE CONCAT('%', #{word}, '%'))
+                    </foreach>
+                    )
+                </if>
+            )
         </if>
     </select>
 
