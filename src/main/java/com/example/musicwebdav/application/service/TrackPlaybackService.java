@@ -4,6 +4,7 @@ import com.example.musicwebdav.api.response.PlaybackSessionResponse;
 import com.example.musicwebdav.api.response.CoverSessionResponse;
 import com.example.musicwebdav.common.config.AppPlaybackProperties;
 import com.example.musicwebdav.common.config.AppSecurityProperties;
+import com.example.musicwebdav.common.config.AppWebDavProperties;
 import com.example.musicwebdav.common.exception.BusinessException;
 import com.example.musicwebdav.common.util.AesCryptoUtil;
 import com.example.musicwebdav.common.util.PlaybackSignUtil;
@@ -30,9 +31,11 @@ import java.util.concurrent.TimeUnit;
 import javax.servlet.http.HttpServletResponse;
 import org.apache.http.Header;
 import org.apache.http.HttpResponse;
-import org.apache.http.client.HttpClient;
+import org.apache.http.client.config.RequestConfig;
 import org.apache.http.client.methods.HttpGet;
+import org.apache.http.impl.client.CloseableHttpClient;
 import org.apache.http.impl.client.HttpClients;
+import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
 import org.apache.http.util.EntityUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -56,6 +59,7 @@ public class TrackPlaybackService {
     private final PlaybackControlService playbackControlService;
     private final AppPlaybackProperties appPlaybackProperties;
     private final MeterRegistry meterRegistry;
+    private final CloseableHttpClient streamHttpClient;
 
     public TrackPlaybackService(TrackMapper trackMapper,
                                 WebDavConfigMapper webDavConfigMapper,
@@ -64,6 +68,7 @@ public class TrackPlaybackService {
                                 PlaybackTokenService playbackTokenService,
                                 PlaybackControlService playbackControlService,
                                 AppPlaybackProperties appPlaybackProperties,
+                                AppWebDavProperties appWebDavProperties,
                                 ObjectProvider<MeterRegistry> meterRegistryProvider) {
         this.trackMapper = trackMapper;
         this.webDavConfigMapper = webDavConfigMapper;
@@ -73,6 +78,18 @@ public class TrackPlaybackService {
         this.playbackControlService = playbackControlService;
         this.appPlaybackProperties = appPlaybackProperties;
         this.meterRegistry = meterRegistryProvider.getIfAvailable();
+
+        RequestConfig requestConfig = RequestConfig.custom()
+                .setConnectTimeout(appWebDavProperties.getConnectTimeoutMs())
+                .setSocketTimeout(appWebDavProperties.getSocketTimeoutMs())
+                .build();
+        PoolingHttpClientConnectionManager cm = new PoolingHttpClientConnectionManager();
+        cm.setMaxTotal(20);
+        cm.setDefaultMaxPerRoute(10);
+        this.streamHttpClient = HttpClients.custom()
+                .setConnectionManager(cm)
+                .setDefaultRequestConfig(requestConfig)
+                .build();
     }
 
     public PlaybackSessionResponse createPlaybackSession(Long trackId, String actor) {
@@ -82,14 +99,21 @@ public class TrackPlaybackService {
             if (track == null) {
                 throw new BusinessException("404", "歌曲不存在", "请刷新后重试");
             }
-            PlaybackTokenService.PlaybackTokenIssue tokenIssue =
-                    playbackTokenService.issueTrackStreamToken(actor, trackId);
-            long signedExpire = (System.currentTimeMillis() / 1000L)
-                    + Math.max(60, appSecurityProperties.getPlaybackSignTtlSec());
+            try {
+                playbackControlService.markTrackStarted(actor, trackId);
+            } catch (Exception ex) {
+                log.warn("PLAYBACK_STATE_INIT_FAILED actor={} trackId={} traceId={}",
+                        safeActor(actor), trackId, currentTraceId(), ex);
+            }
+
+            // 使用 HMAC 签名的 /stream-signed 端点（支持 Range + Content-Length）
+            // 替代旧的 JWT /stream 端点（不支持 Range，iOS AVPlayer 无法获取 duration）
+            long nowEpoch = System.currentTimeMillis() / 1000;
+            long expireEpoch = nowEpoch + appSecurityProperties.getPlaybackSignTtlSec();
             String signature = PlaybackSignUtil.sign(
-                    appSecurityProperties.getPlaybackSignKey(), trackId, signedExpire);
-            String signedPath = "/api/v1/tracks/" + trackId + "/stream-signed?expire="
-                    + signedExpire + "&sign="
+                    appSecurityProperties.getPlaybackSignKey(), trackId, expireEpoch);
+            String signedPath = "/api/v1/tracks/" + trackId
+                    + "/stream-signed?expire=" + expireEpoch + "&sign="
                     + UriUtils.encodeQueryParam(signature, StandardCharsets.UTF_8.name());
 
             String directStreamUrl = null;
@@ -108,20 +132,14 @@ public class TrackPlaybackService {
                 }
             }
 
-            try {
-                playbackControlService.markTrackStarted(actor, trackId);
-            } catch (Exception ex) {
-                log.warn("PLAYBACK_STATE_INIT_FAILED actor={} trackId={} traceId={}",
-                        safeActor(actor), trackId, currentTraceId(), ex);
-            }
 
             recordPlaybackMetric("music.playback.sign.success", 1, "outcome", "success");
             logPlaybackAudit("success", actor, trackId, startedAtNanos, null);
             return new PlaybackSessionResponse(
                     trackId,
                     signedPath,
-                    tokenIssue.getIssuedAtEpochSecond(),
-                    tokenIssue.getExpiresAtEpochSecond(),
+                    nowEpoch,
+                    expireEpoch,
                     Math.max(1L, appPlaybackProperties.getRefreshBeforeExpirySeconds()),
                     StringUtils.hasText(directStreamUrl) ? "DIRECT" : "PROXY",
                     directStreamUrl,
@@ -288,7 +306,6 @@ public class TrackPlaybackService {
                 (username + ":" + decryptedPassword).getBytes(StandardCharsets.UTF_8));
         String targetUrl = streamUrl;
         int redirectHops = 0;
-        HttpClient httpClient = HttpClients.createDefault();
         log.info("PLAYBACK_STREAM_PROXY_START trackId={} sourcePathHash={} range={} upstream={} traceId={}",
                 trackId, summarizePath(sourcePath), summarizeRange(rangeHeader), summarizeUrl(streamUrl), currentTraceId());
         try {
@@ -300,7 +317,7 @@ public class TrackPlaybackService {
                 if (StringUtils.hasText(rangeHeader)) {
                     httpGet.setHeader("Range", rangeHeader);
                 }
-                webDavResponse = httpClient.execute(httpGet);
+                webDavResponse = this.streamHttpClient.execute(httpGet);
                 statusCode = webDavResponse.getStatusLine().getStatusCode();
                 if (!isRedirectStatus(statusCode)) {
                     break;
@@ -347,7 +364,7 @@ public class TrackPlaybackService {
 
             try (InputStream in = webDavResponse.getEntity().getContent();
                  OutputStream out = response.getOutputStream()) {
-                byte[] buffer = new byte[8192];
+                byte[] buffer = new byte[65536];
                 int len;
                 long bytes = 0L;
                 while ((len = in.read(buffer)) != -1) {
