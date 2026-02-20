@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.musicwebdav.infrastructure.persistence.mapper.ScanCheckpointMapper">
+    <insert id="upsert" parameterType="ScanCheckpointEntity">
+        INSERT INTO scan_checkpoint(task_id, dir_path, dir_path_md5, status,
+                file_count, processed_count, failed_count, error_message)
+        VALUES(#{taskId}, #{dirPath}, #{dirPathMd5}, #{status},
+                #{fileCount}, #{processedCount}, #{failedCount}, #{errorMessage})
+        ON DUPLICATE KEY UPDATE
+            status = VALUES(status),
+            file_count = VALUES(file_count),
+            processed_count = VALUES(processed_count),
+            failed_count = VALUES(failed_count),
+            error_message = VALUES(error_message)
+    </insert>
+
+    <select id="selectCompletedDirMd5s" resultType="java.lang.String">
+        SELECT dir_path_md5 FROM scan_checkpoint WHERE task_id = #{taskId} AND status = 'COMPLETED'
+    </select>
+
+    <select id="selectFailedDirs" resultType="ScanCheckpointEntity">
+        SELECT dir_path, dir_path_md5 FROM scan_checkpoint WHERE task_id = #{taskId} AND status = 'FAILED'
+    </select>
+
+    <delete id="deleteByTaskId">
+        DELETE FROM scan_checkpoint WHERE task_id = #{taskId}
+    </delete>
+</mapper>

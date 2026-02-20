@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.musicwebdav.infrastructure.persistence.mapper.PlayEventMapper">
+
+    <insert id="insert" parameterType="PlayEventEntity" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO play_event (track_id, event_type, duration_sec)
+        VALUES (#{trackId}, #{eventType}, #{durationSec})
+    </insert>
+
+    <select id="selectHotTracks" resultType="TrackEntity">
+        SELECT t.id, t.title, t.artist, t.album, t.source_path, t.duration_sec, t.has_lyric
+        FROM (
+          SELECT pe.track_id,
+            SUM(CASE pe.event_type
+              WHEN 'PLAY_COMPLETE' THEN 3
+              WHEN 'PLAY_START' THEN 1
+              WHEN 'SKIP' THEN -1
+              ELSE 0 END
+            ) / LN(AVG(TIMESTAMPDIFF(HOUR, pe.created_at, NOW())) + 2) AS heat
+          FROM play_event pe
+          WHERE pe.created_at >= DATE_SUB(NOW(), INTERVAL #{days} DAY)
+          GROUP BY pe.track_id
+          HAVING heat > 0
+        ) scored
+        INNER JOIN track t ON t.id = scored.track_id AND t.is_deleted = 0
+        ORDER BY scored.heat DESC
+        LIMIT #{limit}
+    </select>
+
+    <select id="selectTopArtists" resultType="java.lang.String">
+        SELECT t.artist
+        FROM play_event pe
+        INNER JOIN track t ON t.id = pe.track_id AND t.is_deleted = 0
+        WHERE pe.created_at >= DATE_SUB(NOW(), INTERVAL #{days} DAY)
+          AND t.artist IS NOT NULL AND t.artist <> ''
+        GROUP BY t.artist
+        ORDER BY SUM(CASE pe.event_type
+          WHEN 'PLAY_COMPLETE' THEN 3
+          WHEN 'PLAY_START' THEN 1
+          WHEN 'SKIP' THEN -1
+          ELSE 0 END) DESC
+        LIMIT #{limit}
+    </select>
+
+    <select id="selectTopGenres" resultType="java.lang.String">
+        SELECT t.genre
+        FROM play_event pe
+        INNER JOIN track t ON t.id = pe.track_id AND t.is_deleted = 0
+        WHERE pe.created_at >= DATE_SUB(NOW(), INTERVAL #{days} DAY)
+          AND t.genre IS NOT NULL AND t.genre <> ''
+        GROUP BY t.genre
+        ORDER BY SUM(CASE pe.event_type
+          WHEN 'PLAY_COMPLETE' THEN 3
+          WHEN 'PLAY_START' THEN 1
+          WHEN 'SKIP' THEN -1
+          ELSE 0 END) DESC
+        LIMIT #{limit}
+    </select>
+
+    <select id="selectRecentlyPlayedTrackIds" resultType="java.lang.Long">
+        SELECT DISTINCT pe.track_id
+        FROM play_event pe
+        WHERE pe.created_at >= DATE_SUB(NOW(), INTERVAL #{days} DAY)
+    </select>
+
+    <select id="selectRecentlyPlayedTracks" resultType="TrackEntity">
+        SELECT t.id, t.title, t.artist, t.album, t.source_path, t.duration_sec, t.has_lyric
+        FROM (
+          SELECT pe.track_id, MAX(pe.created_at) AS last_played_at
+          FROM play_event pe
+          WHERE pe.event_type IN ('PLAY_START', 'PLAY_COMPLETE')
+          GROUP BY pe.track_id
+        ) rp
+        INNER JOIN track t ON t.id = rp.track_id AND t.is_deleted = 0
+        ORDER BY rp.last_played_at DESC
+        LIMIT #{offset}, #{limit}
+    </select>
+
+    <select id="countRecentlyPlayedTracks" resultType="long">
+        SELECT COUNT(DISTINCT pe.track_id)
+        FROM play_event pe
+        INNER JOIN track t ON t.id = pe.track_id AND t.is_deleted = 0
+        WHERE pe.event_type IN ('PLAY_START', 'PLAY_COMPLETE')
+    </select>
+
+</mapper>

@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.musicwebdav.infrastructure.persistence.mapper.PlaylistTrackMapper">
+
+    <insert id="upsert">
+        INSERT INTO playlist_track(playlist_id, track_id, order_no)
+        VALUES(#{playlistId}, #{trackId}, #{orderNo})
+        ON DUPLICATE KEY UPDATE updated_at = NOW()
+    </insert>
+
+    <delete id="deleteByPlaylistAndTrack">
+        DELETE FROM playlist_track WHERE playlist_id = #{playlistId} AND track_id = #{trackId}
+    </delete>
+
+    <delete id="deleteByPlaylistId">
+        DELETE FROM playlist_track WHERE playlist_id = #{playlistId}
+    </delete>
+
+    <delete id="batchDeleteByPlaylistAndTrackIds">
+        DELETE FROM playlist_track WHERE playlist_id = #{playlistId} AND track_id IN
+        <foreach collection="trackIds" item="trackId" open="(" separator="," close=")">
+            #{trackId}
+        </foreach>
+    </delete>
+
+    <select id="countByPlaylistAndTrack" resultType="int">
+        SELECT COUNT(1) FROM playlist_track WHERE playlist_id = #{playlistId} AND track_id = #{trackId}
+    </select>
+
+    <select id="selectMaxOrderNo" resultType="java.lang.Integer">
+        SELECT IFNULL(MAX(order_no), 0) FROM playlist_track WHERE playlist_id = #{playlistId}
+    </select>
+
+    <select id="selectByPlaylistIdOrdered" resultType="PlaylistTrackEntity">
+        SELECT id, playlist_id, track_id, order_no, created_at, updated_at
+        FROM playlist_track WHERE playlist_id = #{playlistId}
+        ORDER BY order_no ASC, id ASC
+    </select>
+
+    <update id="updateOrderNoById">
+        UPDATE playlist_track SET order_no = #{orderNo}, updated_at = NOW() WHERE id = #{id}
+    </update>
+
+    <delete id="deleteByDeletedPlaylists">
+        DELETE pt FROM playlist_track pt
+        LEFT JOIN playlist p ON p.id = pt.playlist_id
+        WHERE p.id IS NULL OR p.is_deleted = 1
+    </delete>
+
+    <delete id="deleteByDeletedTracks">
+        DELETE pt FROM playlist_track pt
+        LEFT JOIN track t ON t.id = pt.track_id
+        WHERE t.id IS NULL OR t.is_deleted = 1
+    </delete>
+
+    <select id="selectTrackPage" resultType="TrackEntity">
+        SELECT t.id, t.title, t.artist, t.album, t.source_path, t.duration_sec, t.has_lyric
+        FROM playlist_track pt
+        INNER JOIN track t ON t.id = pt.track_id
+        WHERE pt.playlist_id = #{playlistId} AND t.is_deleted = 0
+        ORDER BY pt.order_no ASC, pt.id ASC
+        LIMIT #{offset}, #{pageSize}
+    </select>
+
+    <select id="countTracks" resultType="long">
+        SELECT COUNT(1)
+        FROM playlist_track pt
+        INNER JOIN track t ON t.id = pt.track_id
+        WHERE pt.playlist_id = #{playlistId} AND t.is_deleted = 0
+    </select>
+
+    <select id="selectAggregatedTrackPage" resultType="TrackEntity">
+        SELECT t.id, t.title, t.artist, t.album, t.source_path, t.duration_sec, t.has_lyric
+        FROM (
+          SELECT pt.track_id
+          FROM playlist_track pt
+          INNER JOIN playlist p ON p.id = pt.playlist_id
+          WHERE p.is_deleted = 0
+          GROUP BY pt.track_id
+        ) agg
+        INNER JOIN track t ON t.id = agg.track_id
+        WHERE t.is_deleted = 0
+        <if test="keyword != null and keyword != ''">
+          AND (t.title LIKE CONCAT('%', #{keyword}, '%')
+            OR t.artist LIKE CONCAT('%', #{keyword}, '%')
+            OR t.album LIKE CONCAT('%', #{keyword}, '%'))
+        </if>
+        ORDER BY
+        <choose>
+          <when test="sortBy == 'title'">t.title</when>
+          <when test="sortBy == 'artist'">t.artist</when>
+          <when test="sortBy == 'album'">t.album</when>
+          <when test="sortBy == 'year'">t.`year`</when>
+          <when test="sortBy == 'created_at'">t.created_at</when>
+          <otherwise>t.updated_at</otherwise>
+        </choose>
+        <choose>
+          <when test="sortOrder == 'ASC'">ASC</when>
+          <otherwise>DESC</otherwise>
+        </choose>
+        , t.id DESC
+        LIMIT #{offset}, #{pageSize}
+    </select>
+
+    <select id="countAggregatedTracks" resultType="long">
+        SELECT COUNT(1) FROM (
+          SELECT t.id
+          FROM (
+            SELECT pt.track_id
+            FROM playlist_track pt
+            INNER JOIN playlist p ON p.id = pt.playlist_id
+            WHERE p.is_deleted = 0
+            GROUP BY pt.track_id
+          ) agg
+          INNER JOIN track t ON t.id = agg.track_id
+          WHERE t.is_deleted = 0
+          <if test="keyword != null and keyword != ''">
+            AND (t.title LIKE CONCAT('%', #{keyword}, '%')
+              OR t.artist LIKE CONCAT('%', #{keyword}, '%')
+              OR t.album LIKE CONCAT('%', #{keyword}, '%'))
+          </if>
+        ) c
+    </select>
+
+</mapper>

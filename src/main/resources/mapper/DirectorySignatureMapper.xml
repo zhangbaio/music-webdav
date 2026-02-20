@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.musicwebdav.infrastructure.persistence.mapper.DirectorySignatureMapper">
+    <select id="selectByConfigAndDirPathMd5" resultType="DirectorySignatureEntity">
+        SELECT id, config_id, dir_path, dir_path_md5, dir_etag, dir_last_modified, child_count,
+               last_verified_at, created_at, updated_at
+        FROM directory_signature
+        WHERE config_id = #{configId} AND dir_path_md5 = #{dirPathMd5}
+    </select>
+
+    <insert id="upsert" parameterType="DirectorySignatureEntity">
+        INSERT INTO directory_signature(config_id, dir_path, dir_path_md5, dir_etag,
+                dir_last_modified, child_count, last_verified_at)
+        VALUES(#{configId}, #{dirPath}, #{dirPathMd5}, #{dirEtag},
+                #{dirLastModified}, #{childCount}, NOW())
+        ON DUPLICATE KEY UPDATE
+            dir_etag = VALUES(dir_etag),
+            dir_last_modified = VALUES(dir_last_modified),
+            child_count = VALUES(child_count),
+            last_verified_at = NOW(),
+            updated_at = NOW()
+    </insert>
+</mapper>
