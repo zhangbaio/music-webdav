@@ -8,33 +8,47 @@ import com.example.musicwebdav.infrastructure.persistence.entity.UserEntity;
 import com.example.musicwebdav.infrastructure.persistence.mapper.UserMapper;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
-import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 
 @Service
 public class AuthTokenService {
 
+    private static final Logger log = LoggerFactory.getLogger(AuthTokenService.class);
     private static final String CODE_INVALID_CREDENTIALS = "AUTH_INVALID_CREDENTIALS";
     private static final String CODE_REFRESH_INVALID = "AUTH_REFRESH_TOKEN_INVALID";
 
     private final AppAuthProperties properties;
     private final UserMapper userMapper;
     private final JwtUtil jwtUtil;
-    private final BCryptPasswordEncoder passwordEncoder;
+    private final PasswordEncoder passwordEncoder;
 
-    public AuthTokenService(AppAuthProperties properties, UserMapper userMapper, JwtUtil jwtUtil) {
+    public AuthTokenService(AppAuthProperties properties, 
+                           UserMapper userMapper, 
+                           JwtUtil jwtUtil,
+                           PasswordEncoder passwordEncoder) {
         this.properties = properties;
         this.userMapper = userMapper;
         this.jwtUtil = jwtUtil;
-        this.passwordEncoder = new BCryptPasswordEncoder();
+        this.passwordEncoder = passwordEncoder;
     }
 
     public AuthTokenResponse login(String username, String password) {
         UserEntity user = userMapper.selectByUsername(username);
-        if (user == null || !passwordEncoder.matches(password, user.getPasswordHash())) {
+        if (user == null) {
+            log.warn("LOGIN_FAILED reason=USER_NOT_FOUND username={}", username);
+            throw new BusinessException(CODE_INVALID_CREDENTIALS, "用户名或密码错误", "请检查账号密码后重试");
+        }
+        
+        boolean matches = passwordEncoder.matches(password, user.getPasswordHash());
+        if (!matches) {
+            log.warn("LOGIN_FAILED reason=PASSWORD_MISMATCH username={}", username);
             throw new BusinessException(CODE_INVALID_CREDENTIALS, "用户名或密码错误", "请检查账号密码后重试");
         }
 
+        log.info("LOGIN_SUCCESS userId={} username={}", user.getId(), username);
         String token = jwtUtil.generateToken(user.getId(), user.getUsername());
         // For simplicity in this demo migration, we use the same token for access and refresh
         // In production, separate them with different TTLs
